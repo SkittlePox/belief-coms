@@ -2,7 +2,6 @@ from jax.random import categorical
 import distrax, chex, jax
 import jax.numpy as jnp
 from functools import partial
-from dynamics import *
 
 
 class CategoricalBeliefState:

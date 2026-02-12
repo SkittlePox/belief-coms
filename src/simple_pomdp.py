@@ -164,6 +164,7 @@ if __name__ == '__main__':
     agent_0_belief = CategoricalBeliefState(3)
     agent_1_belief = CategoricalBeliefState(3)
     print(agent_0_belief.belief_distribution.probs)
+    print(agent_1_belief.belief_distribution.probs)
 
     env_state, observations, rewards, dones = env.step_env(jax.random.key(10), env_state, jnp.array([0, 0]))
     env.ascii_state(env_state)
@@ -171,6 +172,8 @@ if __name__ == '__main__':
     print(observations, rewards, dones)
 
     agent_0_belief.update(observations[0], 0, env.abstract_transition_function, env.abstract_observation_function)
+    agent_1_belief.update(observations[1], 0, env.abstract_transition_function, env.abstract_observation_function)
     print(agent_0_belief.belief_distribution.probs)
+    print(agent_1_belief.belief_distribution.probs)
 
 
