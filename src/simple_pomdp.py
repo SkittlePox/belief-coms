@@ -119,10 +119,12 @@ class SimplePOMDP(MultiAgentEnv):
         return (initial_environment_state, self.get_obs(key, initial_environment_state)) # This returns a tuple of the observations and the environment state
     
     # State, Action -> Next State
-    def abstract_transition_function(self, state_num, action_num) -> distrax.Categorical:\
+    @partial(jax.jit, static_argnums=(0,))
+    def abstract_transition_function(self, state_num, action_num) -> distrax.Categorical:
         # The underlying state of the world actually doesn't change I think...
         return distrax.Categorical(probs=jnp.zeros(3).at[state_num].set(1))
     
+    @partial(jax.jit, static_argnums=(0,))
     def abstract_observation_function(self, state_num, action_num) -> distrax.Categorical:
         obbs = jnp.ones(3) * 0.5
         obbs = obbs.at[state_num].set(0)
@@ -161,19 +163,21 @@ if __name__ == '__main__':
     # print(env.reset(jax.random.key(9)))
     # print(env.reset(jax.random.key(10)))
 
-    agent_0_belief = CategoricalBeliefState(3)
-    agent_1_belief = CategoricalBeliefState(3)
-    print(agent_0_belief.belief_distribution.probs)
-    print(agent_1_belief.belief_distribution.probs)
+    belief_state_obj = CategoricalBeliefState(3)
+    agent_0_belief = distrax.Categorical(jnp.ones(3))
+    agent_1_belief = distrax.Categorical(jnp.ones(3))
+    print(agent_0_belief.probs)
+    print(agent_1_belief.probs)
 
     env_state, observations, rewards, dones = env.step_env(jax.random.key(10), env_state, jnp.array([0, 0]))
     env.ascii_state(env_state)
 
     print(observations, rewards, dones)
 
-    agent_0_belief.update(observations[0], 0, env.abstract_transition_function, env.abstract_observation_function)
-    agent_1_belief.update(observations[1], 0, env.abstract_transition_function, env.abstract_observation_function)
-    print(agent_0_belief.belief_distribution.probs)
-    print(agent_1_belief.belief_distribution.probs)
+    agent_0_belief = belief_state_obj.update(agent_0_belief, observations[0], 0, env.abstract_transition_function, env.abstract_observation_function)
+    agent_1_belief = belief_state_obj.update(agent_1_belief, observations[1], 0, env.abstract_transition_function, env.abstract_observation_function)
+    print(agent_0_belief.probs)
+    print(agent_1_belief.probs)
+
 
 
