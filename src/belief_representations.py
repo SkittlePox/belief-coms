@@ -26,3 +26,7 @@ class CategoricalBeliefState:
 
         return distrax.Categorical(probs=belief_probs)
 
+
+class DirichletBeliefOfBeliefState:
+    def __init__(self, number_of_unique_states):
+        self.number_of_unique_states = number_of_unique_states

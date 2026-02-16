@@ -69,8 +69,11 @@ class SimplePOMDP(MultiAgentEnv):
     def step_env(self, key: chex.PRNGKey, state: State, actions: chex.Array):
         receiver_action = jax.lax.cond(jnp.logical_not(state.agent_0_is_sending), lambda _: actions[0], lambda _: actions[1], None)    # I could probably also do this using actions.at[state.agent_1_is_sending]
         # If the receiver agent takes the optimal action then there's a reward, 
-        agent_rewards = jax.lax.cond(state.receiver_curtain_up, lambda _: jnp.ones(2) * (receiver_action == state.optimal_receiver_action), lambda _: jnp.array([0, 0], dtype=jnp.float32), None)
-        agent_dones = agent_rewards
+
+        def calc_rewards(recv_action):
+            return jax.lax.cond(recv_action == state.optimal_receiver_action, jnp.ones(2, dtype=jnp.float32), -0.1 * jnp.ones(2, dtype=jnp.float32), None)
+        agent_rewards = jax.lax.cond(state.receiver_curtain_up, calc_rewards, lambda _: jnp.array([0, 0], dtype=jnp.float32), receiver_action)
+        agent_dones = state.receiver_curtain_up
 
         next_environment_state = State(
             agent_0_is_sending=state.agent_0_is_sending,
@@ -125,6 +128,35 @@ class SimplePOMDP(MultiAgentEnv):
         return distrax.Categorical(probs=jnp.zeros(3).at[state_num].set(1))
     
     @partial(jax.jit, static_argnums=(0,))
+    def abstract_joint_transition_function(self, state_num, joint_action_nums) -> distrax.Categorical:
+        # State 0 corresponds to the curtains down state with agent 0 as sender, State 1 is the same but agent 1 as sender
+        # There are only 3 states of the MDP outside of curtains down... Actually I think we have to model it as 6
+        background_probs = jnp.zeros(8)
+        uniform_probs = jnp.ones(6)
+        initial_probs = background_probs.at[jnp.arange(2, 8)].set(uniform_probs)
+        return jax.lax.cond(state_num < 2, lambda _: distrax.Categorical(probs=initial_probs), lambda _: distrax.Categorical(probs=jnp.zeros(8).at[state_num].set(1)), None)
+    
+    def abstract_joint_observation_function(self, state_num, joint_action_nums) -> [distrax.Categorical, distrax.Categorical]:
+        # In state 0 and 1, the agents only see whether they are speaker or listener
+        # There's -2, -1, 0-2 (corresponding to observations A-C)
+        def initial_state_odds(state_n):
+            sender_obs_prob = distrax.Categorical(probs=jnp.zeros(5).at[1].set(1))
+            receiver_obs_prob = distrax.Categorical(probs=jnp.zeros(5).at[0].set(1))
+            return jax.lax.cond(state_n == 0, lambda _: sender_obs_prob, receiver_obs_prob, lambda _: receiver_obs_prob, sender_obs_prob, None)
+        
+        def other_state_odds(state_n):
+            # In state 2 - 4, agent 0 is sender and optimal action is ABC
+            # In state 5 - 7, agent 1 is sender and optimal action is ABC
+            excluded_observation = (state_n - 2) % 3
+            # They see 2, 3, 4 - excluded_observation
+            probs = jnp.zeros(5).at[jnp.arange(2,5)].set(0.5).at[excluded_observation+2].set(0)
+            return distrax.Categorical(probs=probs), distrax.Categorical(probs=probs)
+            # This doesn't totally describe the behavior of the environment... because these distributions are not independent!!
+            # So does that mean there is another state in there??
+
+        return jax.lax.cond(state_num < 2, initial_state_odds, other_state_odds, state_num)
+
+    @partial(jax.jit, static_argnums=(0,))
     def abstract_observation_function(self, state_num, action_num) -> distrax.Categorical:
         obbs = jnp.ones(3) * 0.5
         obbs = obbs.at[state_num].set(0)
@@ -168,6 +200,9 @@ if __name__ == '__main__':
     agent_1_belief = distrax.Categorical(jnp.ones(3))
     print(agent_0_belief.probs)
     print(agent_1_belief.probs)
+
+    agent_0_belief_about_agent_1 = distrax.Dirichlet(concentration=jnp.ones(3))
+    agent_1_belief_about_agent_0 = distrax.Dirichlet(concentration=jnp.ones(3))
 
     env_state, observations, rewards, dones = env.step_env(jax.random.key(10), env_state, jnp.array([0, 0]))
     env.ascii_state(env_state)
