@@ -60,8 +60,8 @@ class SimplePOMDP(MultiAgentEnv):
     @partial(jax.jit, static_argnums=(0,))  # This is safe because 'self' is never used in this function
     def get_obs(self, key: chex.PRNGKey, state: State):
         # The agent must observe whether it is a sender or receiver, and receiver the actual observations from the other agent and from behind the curtain.
-        sender_obs = jax.lax.cond(state.sender_curtain_up, lambda _: state.observation_behind_sender_curtain, lambda _: jnp.array(-1), None)        # An observation of -1 means that you are the sender
-        receiver_obs = jax.lax.cond(state.receiver_curtain_up, lambda _: state.observation_behind_receiver_curtain, lambda _: jnp.array(-2), None)  # An observation of -2 means that you are the receiver
+        sender_obs = jax.lax.cond(state.sender_curtain_up, lambda _: state.observation_behind_sender_curtain, lambda _: jnp.array(0), None)        # An observation of 0 means that you are the sender
+        receiver_obs = jax.lax.cond(state.receiver_curtain_up, lambda _: state.observation_behind_receiver_curtain, lambda _: jnp.array(1), None)  # An observation of 1 means that you are the receiver
         agent_obs = jax.lax.cond(state.agent_0_is_sending, lambda _: (sender_obs, receiver_obs), lambda _: (receiver_obs, sender_obs), None)
         return agent_obs    # This returns a tuple of observations corresponding to (agent_0, agent_1)
 
@@ -71,7 +71,7 @@ class SimplePOMDP(MultiAgentEnv):
         # If the receiver agent takes the optimal action then there's a reward, 
 
         def calc_rewards(recv_action):
-            return jax.lax.cond(recv_action == state.optimal_receiver_action, jnp.ones(2, dtype=jnp.float32), -0.1 * jnp.ones(2, dtype=jnp.float32), None)
+            return jax.lax.select(recv_action == state.optimal_receiver_action, jnp.ones(2, dtype=jnp.float32), -0.1 * jnp.ones(2, dtype=jnp.float32))
         agent_rewards = jax.lax.cond(state.receiver_curtain_up, calc_rewards, lambda _: jnp.array([0, 0], dtype=jnp.float32), receiver_action)
         agent_dones = state.receiver_curtain_up
 
@@ -126,6 +126,13 @@ class SimplePOMDP(MultiAgentEnv):
     def abstract_transition_function(self, state_num, action_num) -> distrax.Categorical:
         # The underlying state of the world actually doesn't change I think...
         return distrax.Categorical(probs=jnp.zeros(3).at[state_num].set(1))
+
+    @partial(jax.jit, static_argnums=(0,))
+    def abstract_observation_function(self, state_num, action_num) -> distrax.Categorical:
+        obbs = jnp.ones(3) * 0.5
+        obbs = obbs.at[state_num].set(0)
+        return distrax.Categorical(probs=obbs)
+
     
     @partial(jax.jit, static_argnums=(0,))
     def abstract_joint_transition_function(self, state_num, joint_action_nums) -> distrax.Categorical:
@@ -136,31 +143,72 @@ class SimplePOMDP(MultiAgentEnv):
         initial_probs = background_probs.at[jnp.arange(2, 8)].set(uniform_probs)
         return jax.lax.cond(state_num < 2, lambda _: distrax.Categorical(probs=initial_probs), lambda _: distrax.Categorical(probs=jnp.zeros(8).at[state_num].set(1)), None)
     
-    def abstract_joint_observation_function(self, state_num, joint_action_nums) -> [distrax.Categorical, distrax.Categorical]:
-        # In state 0 and 1, the agents only see whether they are speaker or listener
-        # There's -2, -1, 0-2 (corresponding to observations A-C)
-        def initial_state_odds(state_n):
-            sender_obs_prob = distrax.Categorical(probs=jnp.zeros(5).at[1].set(1))
-            receiver_obs_prob = distrax.Categorical(probs=jnp.zeros(5).at[0].set(1))
-            return jax.lax.cond(state_n == 0, lambda _: sender_obs_prob, receiver_obs_prob, lambda _: receiver_obs_prob, sender_obs_prob, None)
-        
-        def other_state_odds(state_n):
-            # In state 2 - 4, agent 0 is sender and optimal action is ABC
-            # In state 5 - 7, agent 1 is sender and optimal action is ABC
-            excluded_observation = (state_n - 2) % 3
-            # They see 2, 3, 4 - excluded_observation
-            probs = jnp.zeros(5).at[jnp.arange(2,5)].set(0.5).at[excluded_observation+2].set(0)
-            return distrax.Categorical(probs=probs), distrax.Categorical(probs=probs)
-            # This doesn't totally describe the behavior of the environment... because these distributions are not independent!!
-            # So does that mean there is another state in there??
-
-        return jax.lax.cond(state_num < 2, initial_state_odds, other_state_odds, state_num)
-
+    
     @partial(jax.jit, static_argnums=(0,))
-    def abstract_observation_function(self, state_num, action_num) -> distrax.Categorical:
-        obbs = jnp.ones(3) * 0.5
-        obbs = obbs.at[state_num].set(0)
-        return distrax.Categorical(probs=obbs)
+    def abstract_joint_observation_function(self, state_num) -> [distrax.Categorical, distrax.Categorical]:
+        # There are 5 possible observations:
+        # 0, 1 are sender, receiver
+        # 2, 3, 4 are observations A, B, C
+        #
+        #                             Agent 0
+        #                  R       S       A       B       C
+        #              +-------+-------+-------+-------+-------+
+        #            R | (0,0) | (0,1) | (0,2) | (0,3) | (0,4) |
+        #              +-------+-------+-------+-------+-------+
+        #            S | (1,0) | (1,1) | (1,2) | (1,3) | (1,4) |
+        #              +-------+-------+-------+-------+-------+
+        #  Agent 1   A | (2,0) | (2,1) | (2,2) | (2,3) | (2,4) |
+        #              +-------+-------+-------+-------+-------+
+        #            B | (3,0) | (3,1) | (3,2) | (3,3) | (3,4) |
+        #              +-------+-------+-------+-------+-------+
+        #            C | (4,0) | (4,1) | (4,2) | (4,3) | (4,4) |
+        #              +-------+-------+-------+-------+-------+
+        #                         (agent 0, agent 1)
+
+        # So I need to construct a distribution over 25 categories.
+        background_likelihoods = jnp.zeros(25, dtype=jnp.float32)
+
+        # In state 0 and 1, the agents only see whether they are speaker or listener
+        def initial_state_odds():
+            probs = background_likelihoods.at[1].set(0.5)
+            probs = probs.at[5].set(0.5)
+            
+            sender_obs_prob = distrax.Categorical(probs=probs)
+            receiver_obs_prob = distrax.Categorical(probs=probs)
+            return sender_obs_prob, receiver_obs_prob
+
+        # In all other states, agents see a single observation that isn't the optimal action
+        # In state 2 - 4, agent 0 is sender and optimal action is ABC
+        # In state 5 - 7, agent 1 is sender and optimal action is ABC
+
+        def state_2_5_odds():
+            # A is the optimal action
+            probs = background_likelihoods.at[23].set(0.5)
+            probs = probs.at[19].set(0.5)
+
+            sender_obs_prob = distrax.Categorical(probs=probs)
+            receiver_obs_prob = distrax.Categorical(probs=probs)
+            return sender_obs_prob, receiver_obs_prob
+        
+        def state_3_6_odds():
+            # B is the optimal action
+            probs = background_likelihoods.at[22].set(0.5)
+            probs = probs.at[14].set(0.5)
+
+            sender_obs_prob = distrax.Categorical(probs=probs)
+            receiver_obs_prob = distrax.Categorical(probs=probs)
+            return sender_obs_prob, receiver_obs_prob
+        
+        def state_4_7_odds():
+            # C is the optimal action
+            probs = background_likelihoods.at[17].set(0.5)
+            probs = probs.at[13].set(0.5)
+
+            sender_obs_prob = distrax.Categorical(probs=probs)
+            receiver_obs_prob = distrax.Categorical(probs=probs)
+            return sender_obs_prob, receiver_obs_prob
+
+        return jax.lax.switch(state_num // 2, [initial_state_odds, state_2_5_odds, state_3_6_odds, state_4_7_odds])
 
     def ascii_state(self, state: State):
         state_visual = copy.deepcopy(self.template)
