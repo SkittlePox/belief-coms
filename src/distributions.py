@@ -2,16 +2,21 @@ import distrax, chex, jax
 import jax.numpy as jnp
 # from typing import Optional, Array, Union, Any
 
-class JointCategoricalPairFactory():
-    def __init__(self, var1_num_categories, var2_num_categories):
-        self.var1_num_categories = var1_num_categories
-        self.var2_num_categories = var2_num_categories
+class JointCategoricalPair():
+    def __init__(self, vars_num_categories=None, probs_2d=None, probs_flat=None):
+        if vars_num_categories != None:
+            self.var1_num_categories, self.var2_num_categories = vars_num_categories
+        elif probs_2d != None:
+            self.var1_num_categories, self.var2_num_categories = probs_2d.shape
+        else:
+            raise RuntimeError
 
-        self.underlying_probs = jnp.zeros((var1_num_categories, var2_num_categories))
-        self.flat_joint_distribution = distrax.Categorical(logits=jnp.ones(var1_num_categories * var2_num_categories))
-        self.internal_distribution_is_stale = False
+        # self.underlying_probs = jnp.zeros((var1_num_categories, var2_num_categories)) if probs == None else probs
+        # self.flat_joint_distribution = distrax.Categorical(logits=jnp.ones(var1_num_categories * var2_num_categories))
+        # self.internal_distribution_is_stale = False
     
-    def set_probs(self, var1_idx, var2_idx, probability):
+    def set_probs(self, probs_2d, var1_idx, var2_idx, probability):
+        
         self.underlying_probs = self.underlying_probs.at[var1_idx, var2_idx].set(probability)
         self.internal_distribution_is_stale = True
     
@@ -25,6 +30,7 @@ class JointCategoricalPairFactory():
         # jax.debug.assert(jnp.sum(self.underlying_probs) == 1.0)
         self.flat_joint_distribution = distrax.Categorical(probs=self.underlying_probs.flatten())
         self.internal_distribution_is_stale = False
+        return self.flat_joint_distribution
 
     def marginalize_var1(self):
         # Need to do something like this:
@@ -51,7 +57,7 @@ class JointCategoricalPairFactory():
 # let's imagine two variables with 3 and 5 categories respectively. A grid with 3 rows and 5 cols.
 
 if __name__ == "__main__":
-    factory = JointCategoricalPairFactory(var1_num_categories=3, var2_num_categories=5)
+    factory = JointCategoricalPair(var1_num_categories=3, var2_num_categories=5)
     
     key = jax.random.PRNGKey(8)
 
