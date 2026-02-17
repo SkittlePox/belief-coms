@@ -134,7 +134,6 @@ class SimplePOMDP(MultiAgentEnv):
         obbs = obbs.at[state_num].set(0)
         return distrax.Categorical(probs=obbs)
 
-    
     @partial(jax.jit, static_argnums=(0,))
     def abstract_joint_transition_function(self, state_num, joint_action_nums) -> distrax.Categorical:
         # State 0 corresponds to the curtains down state with agent 0 as sender, State 1 is the same but agent 1 as sender
@@ -144,8 +143,6 @@ class SimplePOMDP(MultiAgentEnv):
         initial_probs = background_probs.at[jnp.arange(2, 8)].set(uniform_probs)
         return jax.lax.cond(state_num < 2, lambda _: distrax.Categorical(probs=initial_probs), lambda _: distrax.Categorical(probs=jnp.zeros(8).at[state_num].set(1)), None)
     
-    
-    # TODO: Convert usage to JointCategoricalPair
     @partial(jax.jit, static_argnums=(0,))
     def abstract_joint_observation_function(self, state_num) -> [distrax.Categorical, distrax.Categorical]:
         # There are 5 possible observations:
@@ -169,23 +166,15 @@ class SimplePOMDP(MultiAgentEnv):
 
         # So I need to construct a distribution over 25 categories.
         background_likelihoods = jnp.zeros(25, dtype=jnp.float32)
-        observation_distribution = JointCategoricalPair(5, 5)
 
         # In state 0 and 1, the agents only see whether they are speaker or listener
         def initial_state_odds():
-            # probs = background_likelihoods.at[1].set(0.5)
-            # probs = probs.at[5].set(0.5)
+            probs = background_likelihoods.at[1].set(0.5)
+            probs = probs.at[5].set(0.5)
 
-            
-            
-            # sender_obs_prob = distrax.Categorical(probs=probs)
-            # receiver_obs_prob = distrax.Categorical(probs=probs)
-
-            observation_distribution.set_probs(0, 1, 0.5)
-            observation_distribution.set_probs(1, 0, 0.5)
-            flattened_dist = observation_distribution.make_distribution()
-
-            return flattened_dist, copy.deepcopy(flattened_dist)
+            sender_obs_prob = distrax.Categorical(probs=probs)
+            receiver_obs_prob = distrax.Categorical(probs=probs)
+            return sender_obs_prob, receiver_obs_prob
 
         # In all other states, agents see a single observation that isn't the optimal action
         # In state 2 - 4, agent 0 is sender and optimal action is ABC
@@ -193,42 +182,30 @@ class SimplePOMDP(MultiAgentEnv):
 
         def state_2_5_odds():
             # A is the optimal action
-            # probs = background_likelihoods.at[23].set(0.5)
-            # probs = probs.at[19].set(0.5)
+            probs = background_likelihoods.at[23].set(0.5)
+            probs = probs.at[19].set(0.5)
 
-            observation_distribution.set_probs(3, 4, 0.5)
-            observation_distribution.set_probs(4, 3, 0.5)
-            flattened_dist = observation_distribution.make_distribution()
-
-            # sender_obs_prob = distrax.Categorical(probs=probs)
-            # receiver_obs_prob = distrax.Categorical(probs=probs)
-            return flattened_dist, copy.deepcopy(flattened_dist)
+            sender_obs_prob = distrax.Categorical(probs=probs)
+            receiver_obs_prob = distrax.Categorical(probs=probs)
+            return sender_obs_prob, receiver_obs_prob
         
         def state_3_6_odds():
             # B is the optimal action
             probs = background_likelihoods.at[22].set(0.5)
             probs = probs.at[14].set(0.5)
 
-            observation_distribution.set_probs(2, 4, 0.5)
-            observation_distribution.set_probs(4, 2, 0.5)
-            flattened_dist = observation_distribution.make_distribution()
-
             sender_obs_prob = distrax.Categorical(probs=probs)
             receiver_obs_prob = distrax.Categorical(probs=probs)
-            return flattened_dist, copy.deepcopy(flattened_dist)
+            return sender_obs_prob, receiver_obs_prob
         
         def state_4_7_odds():
             # C is the optimal action
             probs = background_likelihoods.at[17].set(0.5)
             probs = probs.at[13].set(0.5)
 
-            observation_distribution.set_probs(2, 3, 0.5)
-            observation_distribution.set_probs(3, 2, 0.5)
-            flattened_dist = observation_distribution.make_distribution()
-
             sender_obs_prob = distrax.Categorical(probs=probs)
             receiver_obs_prob = distrax.Categorical(probs=probs)
-            return flattened_dist, copy.deepcopy(flattened_dist)
+            return sender_obs_prob, receiver_obs_prob
 
         return jax.lax.switch(state_num // 2, [initial_state_odds, state_2_5_odds, state_3_6_odds, state_4_7_odds])
 

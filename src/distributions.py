@@ -1,71 +1,48 @@
 import distrax, chex, jax
+from jax.experimental import checkify
 import jax.numpy as jnp
+from functools import partial
 # from typing import Optional, Array, Union, Any
 
 class JointCategoricalPair():
-    def __init__(self, vars_num_categories=None, probs_2d=None, probs_flat=None):
-        if vars_num_categories != None:
-            self.var1_num_categories, self.var2_num_categories = vars_num_categories
-        elif probs_2d != None:
-            self.var1_num_categories, self.var2_num_categories = probs_2d.shape
-        else:
-            raise RuntimeError
+    def __init__(self, vars_num_categories):
+        self.var1_num_categories, self.var2_num_categories = vars_num_categories
+    
+    @partial(jax.jit, static_argnums=(0,))
+    def marginalize_var1(self, probs_flat_distribution):
+        checkify.check(jnp.sum(probs_flat_distribution.probs) == 1.0, 'Probabilities do not sum to 1.0')
+        probs_2d = probs_flat_distribution.probs.reshape((self.var1_num_categories, self.var2_num_categories))
+        marginalized_probs = jnp.sum(probs_2d, axis=0)
+        return distrax.Categorical(probs=marginalized_probs)
 
-        # self.underlying_probs = jnp.zeros((var1_num_categories, var2_num_categories)) if probs == None else probs
-        # self.flat_joint_distribution = distrax.Categorical(logits=jnp.ones(var1_num_categories * var2_num_categories))
-        # self.internal_distribution_is_stale = False
-    
-    def set_probs(self, probs_2d, var1_idx, var2_idx, probability):
-        
-        self.underlying_probs = self.underlying_probs.at[var1_idx, var2_idx].set(probability)
-        self.internal_distribution_is_stale = True
-    
-    def add_probs(self, var1_idx, var2_idx, probability):
-        self.underlying_probs = self.underlying_probs.at[var1_idx, var2_idx].set(
-            probability + self.underlying_probs[var1_idx][var2_idx])
-        self.internal_distribution_is_stale = True
-    
-    def make_distribution(self):
-        # Need to do something like this:
-        # jax.debug.assert(jnp.sum(self.underlying_probs) == 1.0)
-        self.flat_joint_distribution = distrax.Categorical(probs=self.underlying_probs.flatten())
-        self.internal_distribution_is_stale = False
-        return self.flat_joint_distribution
-
-    def marginalize_var1(self):
-        # Need to do something like this:
-        # jax.debug.assert(jnp.sum(self.underlying_probs) == 1.0)
-        marginalized_probs = jnp.sum(self.underlying_probs, axis=0)
+    @partial(jax.jit, static_argnums=(0,))
+    def marginalize_var2(self, probs_flat_distribution):
+        checkify.check(jnp.sum(probs_flat_distribution.probs) == 1.0, 'Probabilities do not sum to 1.0')
+        probs_2d = probs_flat_distribution.probs.reshape((self.var1_num_categories, self.var2_num_categories))
+        marginalized_probs = jnp.sum(probs_2d, axis=1)
         return distrax.Categorical(probs=marginalized_probs)
     
-    def marginalize_var2(self):
-        # Need to do something like this:
-        # jax.debug.assert(jnp.sum(self.underlying_probs) == 1.0)
-        marginalized_probs = jnp.sum(self.underlying_probs, axis=1)
-        return distrax.Categorical(probs=marginalized_probs)
-    
-    def sample_joint_distribution(self, key: chex.PRNGKey):
-        # Assert self.flat_joint_distribution is not None and not internal_distribution_is_stale
-        flattened_sample = self.flat_joint_distribution.sample(seed=key)
+    @partial(jax.jit, static_argnums=(0,))
+    def sample_joint_distribution(self, probs_flat_distribution, key: chex.PRNGKey):
+        checkify.check(jnp.sum(probs_flat_distribution.probs) == 1.0, 'Probabilities do not sum to 1.0')
+        flattened_sample = probs_flat_distribution.sample(seed=key)
         var_1_cat = flattened_sample // self.var1_num_categories
         var_2_cat = flattened_sample % self.var2_num_categories
         return jnp.stack((var_1_cat, var_2_cat))
-    
-    def __str__(self) -> str:
-        return str(self.underlying_probs)
+
 
 # let's imagine two variables with 3 and 5 categories respectively. A grid with 3 rows and 5 cols.
 
 if __name__ == "__main__":
-    factory = JointCategoricalPair(var1_num_categories=3, var2_num_categories=5)
+    factory = JointCategoricalPair(vars_num_categories=(3, 5))
     
     key = jax.random.PRNGKey(8)
 
-    factory.set_probs(0, 1, 0.5)
-    factory.set_probs(0, 2, 0.5)
+    initial_probs = jnp.zeros(15).at[1:3].set(jnp.array([0.5, 0.5]))
 
-    factory.make_distribution()
+    marg_dist = factory.marginalize_var1(distrax.Categorical(probs=initial_probs))
 
-    print(factory)
+    print(marg_dist.probs)
 
-    print(factory.sample_joint_distribution(key))
+    print(factory.sample_joint_distribution(distrax.Categorical(probs=initial_probs), key))
+
