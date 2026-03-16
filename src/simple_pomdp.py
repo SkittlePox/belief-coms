@@ -7,6 +7,8 @@ from functools import partial
 from belief_representations import *
 from distributions import *
 
+# NOTE: I don't like the way this is done. The environment isn't quite right. The observation space is weird.
+
 
 @struct.dataclass
 class State:    # Underlying state of the decision-process

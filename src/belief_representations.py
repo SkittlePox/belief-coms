@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from functools import partial
 
 
-class CategoricalBeliefState:
+class CategoricalBeliefStateOld:
     def __init__(self, number_of_unique_states, number_of_unique_observations):
         # We need to know the number of possible underlying states and the initial belief distribution over states
         self.number_of_unique_states = number_of_unique_states
@@ -46,6 +46,15 @@ class CategoricalBeliefState:
 
         return distrax.Categorical(probs=belief_probs)
 
+
+class CategoricalBeliefState:
+    """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution.
+
+    """
+    def __init__(self) -> None:
+        pass
+
+    # def update_with_jointx
 
 class DirichletBeliefOfBeliefState:
     def __init__(self, number_of_unique_states):
