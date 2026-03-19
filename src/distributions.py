@@ -83,7 +83,7 @@ class JointCategoricalPair():
         return distrax.Categorical(probs=marginalized_probs)
 
     @partial(jax.jit, static_argnums=(0,))
-    def sample_joint_distribution(self, probs_flat_distribution, key: chex.PRNGKey):
+    def sample_joint_distribution(self, key: chex.PRNGKey, probs_flat_distribution):
         """Draw one sample from the joint distribution and decode it to (var1, var2).
 
         Samples a flat index from the joint `distrax.Categorical`, then decodes
@@ -122,5 +122,5 @@ if __name__ == "__main__":
     print(marg_dist.probs)
 
     # Sample a (var1, var2) pair from the joint. Should return [0, 1] or [0, 2].
-    print(factory.sample_joint_distribution(distrax.Categorical(probs=initial_probs), key))
+    print(factory.sample_joint_distribution(key, distrax.Categorical(probs=initial_probs)))
 
