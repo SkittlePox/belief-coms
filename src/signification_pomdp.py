@@ -82,13 +82,15 @@ class ImageSigPOMDP(MultiAgentEnv):
         return (initial_environment_state, self.get_obs(key, initial_environment_state))
 
     @partial(jax.jit, static_argnums=(0,))
-    def _joint_transition_function(self, state_num, receiver_action):
+    def _joint_transition_function(self, state_num, joint_action):
         """ There are only 5 possible states. The initial state of 3 where nothing can happen, the final state 4 where you get reward, and then the states 0-2 corresponding to optimal actions 0-2
         """
         # If you are in state 3, the initial state, there is a 1/3 chance of transition of states 0-2
         # If you are in states 0-2, depending on the receiver action you will either stay in the same state or transition to the final state (4)
 
         # This function should be represented as T(s'|s, a)
+
+        (sender_action, receiver_action) = joint_action
 
         def state_0_1_2():
             idx = jax.lax.cond(state_num == receiver_action, lambda _: 4, lambda _: state_num, None)
@@ -107,10 +109,10 @@ class ImageSigPOMDP(MultiAgentEnv):
         return distrax.Categorical(probs=probs)
 
     @partial(jax.jit, static_argnums=(0,))
-    def _joint_observation_function(self, state_num, receiver_action):
+    def _joint_observation_function(self, state_num):
         """ There are only 3 environment observations: A, B, C corresponding to 0, 1, 2
         """
-        # This function should be represented as O(o1, o2|s, a), a 2D categorical distribution, dim 3
+        # This function should be represented as O(o1, o2|s), a 2D categorical distribution, dim 3
         #                       Agent 0
         #                  A       B       C
         #              +-------+-------+-------+
@@ -136,6 +138,23 @@ class ImageSigPOMDP(MultiAgentEnv):
 
         probs = jax.lax.switch(state_num, [state_0, state_1, state_2])  # These are the only states that matter I think...
         return distrax.Categorical(probs=probs)
+
+    def _joint_action_constructor(self, agent_id, ego_action, other_action):
+        return jax.lax.cond(
+            agent_id == 0,
+            lambda _: (ego_action, other_action),
+            lambda _: (other_action, ego_action),
+            None
+        )
+
+
+def optimal_policy(belief_distribution: distrax.Categorical):
+    """ Returns a probability distribution over possible actions in the DecPOMDP.
+    belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
+    """
+    # I'm not sure how to write this for arbitrary distributions...
+    # The funny thing is I think in this case it's actually literally just the belief distribution! The optimal action distribution is the same as the belief distribution here...
+    return belief_distribution
         
 
 if __name__ == '__main__':
@@ -147,18 +166,37 @@ if __name__ == '__main__':
 
     ### Transition function tests
     # Actions do nothing in initial state. 1/3 chance of ending up in 0, 1, or 2
-    print(env._joint_transition_function(3, 0).probs)
-    print(env._joint_transition_function(3, 1).probs)
+    print(env._joint_transition_function(3, (-1, 0)).probs)
+    print(env._joint_transition_function(3, (-1, 1)).probs)
 
     # In states 0, 1, 2 you either stay in your current state or get to the end state
-    print(env._joint_transition_function(0, 0).probs)
-    print(env._joint_transition_function(0, 1).probs)
+    print(env._joint_transition_function(0, (-1, 0)).probs)
+    print(env._joint_transition_function(0, (-1, 1)).probs)
 
     # Nothing happens in the end state
-    print(env._joint_transition_function(4, 0).probs)
+    print(env._joint_transition_function(4, (-1, 0)).probs)
 
     ### Observation function tests
     factory = JointCategoricalPair(vars_num_categories=(3, 3))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(0, 0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(1, 0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(2, 0)))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(0)))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(1)))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(2)))
+
+
+    ### Belief update test
+    initial_belief = distrax.Categorical(probs=jnp.zeros(5).at[0:3].set([1.0, 1.0, 1.0])/3)
+    print(initial_belief.probs)
+
+    belief_factory = CategoricalBeliefState(agent_id=0, num_unique_states=3, num_unique_observations=3, joint_transition_function=env._joint_transition_function, joint_observation_function=env._joint_observation_function, joint_action_constructor=env._joint_action_constructor)
+
+    new_belief = belief_factory.update_with_observation_and_joint_action(initial_belief, 1, (-1, 3))
+    print(new_belief.probs)
+
+    uniform_belief = distrax.Categorical(probs=jnp.ones(3))
+    
+    # their_beliefs = belief_factory.update_with_observation(uniform_belief, uniform_belief, 1, 4, optimal_policy)
+
+
+    their_beliefs = belief_factory.update_other_belief_estimate_with_observation_only(initial_belief, 1, 3, optimal_policy)
+
+    print(their_beliefs.probs)

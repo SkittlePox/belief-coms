@@ -83,6 +83,54 @@ class JointCategoricalPair():
         return distrax.Categorical(probs=marginalized_probs)
 
     @partial(jax.jit, static_argnums=(0,))
+    def prob(self, probs_flat_distribution, var1, var2):
+        """Return the joint probability P(var1=var1, var2=var2).
+
+        Args:
+            probs_flat_distribution: A `distrax.Categorical` whose `.probs`
+                has shape `(var1_num_categories * var2_num_categories,)`.
+            var1: Category index for var1.
+            var2: Category index for var2.
+
+        Returns:
+            A scalar JAX array containing P(var1, var2).
+        """
+        flat_index = var1 * self.var2_num_categories + var2
+        return probs_flat_distribution.probs[flat_index]
+
+    @partial(jax.jit, static_argnums=(0,))
+    def conditional_var2_given_var1(self, probs_flat_distribution, var1_val):
+        """Return the conditional distribution P(var2 | var1=var1_val).
+
+        Args:
+            probs_flat_distribution: A `distrax.Categorical` whose `.probs`
+                has shape `(var1_num_categories * var2_num_categories,)`.
+            var1_val: The observed category of var1 to condition on.
+
+        Returns:
+            A `distrax.Categorical` over var2 with shape `(var2_num_categories,)`.
+        """
+        probs_2d = probs_flat_distribution.probs.reshape((self.var1_num_categories, self.var2_num_categories))
+        row = probs_2d[var1_val, :]
+        return distrax.Categorical(probs=jnp.nan_to_num(row / row.sum()))
+
+    @partial(jax.jit, static_argnums=(0,))
+    def conditional_var1_given_var2(self, probs_flat_distribution, var2_val):
+        """Return the conditional distribution P(var1 | var2=var2_val).
+
+        Args:
+            probs_flat_distribution: A `distrax.Categorical` whose `.probs`
+                has shape `(var1_num_categories * var2_num_categories,)`.
+            var2_val: The observed category of var2 to condition on.
+
+        Returns:
+            A `distrax.Categorical` over var1 with shape `(var1_num_categories,)`.
+        """
+        probs_2d = probs_flat_distribution.probs.reshape((self.var1_num_categories, self.var2_num_categories))
+        col = probs_2d[:, var2_val]
+        return distrax.Categorical(probs=jnp.nan_to_num(col / col.sum()))
+
+    @partial(jax.jit, static_argnums=(0,))
     def sample_joint_distribution(self, key: chex.PRNGKey, probs_flat_distribution):
         """Draw one sample from the joint distribution and decode it to (var1, var2).
 
