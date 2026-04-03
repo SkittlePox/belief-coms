@@ -109,7 +109,7 @@ class ImageSigPOMDP(MultiAgentEnv):
         return distrax.Categorical(probs=probs)
 
     @partial(jax.jit, static_argnums=(0,))
-    def _joint_observation_function(self, state_num):
+    def _joint_observation_function(self, state_num, joint_action):
         """ There are only 3 environment observations: A, B, C corresponding to 0, 1, 2
         """
         # This function should be represented as O(o1, o2|s), a 2D categorical distribution, dim 3
@@ -178,16 +178,16 @@ if __name__ == '__main__':
 
     ### Observation function tests
     factory = JointCategoricalPair(vars_num_categories=(3, 3))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(1)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(2)))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(0, 0)))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(1, 0)))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(2, 0)))
 
 
     ### Belief update test
     initial_belief = distrax.Categorical(probs=jnp.zeros(5).at[0:3].set([1.0, 1.0, 1.0])/3)
     print(initial_belief.probs)
 
-    belief_factory = CategoricalBeliefState(agent_id=0, num_unique_states=3, num_unique_observations=3, joint_transition_function=env._joint_transition_function, joint_observation_function=env._joint_observation_function, joint_action_constructor=env._joint_action_constructor)
+    belief_factory = CategoricalBeliefState(num_unique_states=3, num_unique_observations=3, num_unique_actions=4, joint_transition_function=env._joint_transition_function, joint_observation_function=env._joint_observation_function, joint_action_constructor=env._joint_action_constructor)
 
     new_belief = belief_factory.update_with_observation_and_joint_action(initial_belief, 1, (-1, 3))
     print(new_belief.probs)
@@ -196,7 +196,7 @@ if __name__ == '__main__':
     
     # their_beliefs = belief_factory.update_with_observation(uniform_belief, uniform_belief, 1, 4, optimal_policy)
 
-
-    their_beliefs = belief_factory.update_other_belief_estimate_with_observation_only(initial_belief, 1, 3, optimal_policy)
+    print(initial_belief.probs)
+    their_beliefs = belief_factory.update_other_belief_estimate_with_observation_only(initial_belief, 0, 3, optimal_policy) # Prob for index 1 should be non-zero!
 
     print(their_beliefs.probs)
