@@ -117,35 +117,28 @@ class CategoricalBeliefState:
         other_action_dist = optimal_policy(other_belief_distribution_estimate)
 
         def state_likelihood(next_state):
-            # O(oi | s') — marginalize joint obs model down to this agent's view
-            def if_other_took_action(other_action):
-                joint_action = self.joint_action_constructor(self.agent_id, previous_ego_action, other_action)
-                joint_obs = self.joint_observation_function(next_state, joint_action)
+            def contribution_for_other_action(other_action):
+                joint_action = self.joint_action_constructor(agent_id, previous_ego_action, other_action)
 
+                # O(oi | s') — marginalize joint obs model down to this agent's view
+                joint_obs = self.joint_observation_function(next_state, joint_action)
                 marginal_obs = jax.lax.cond(
                     agent_id == 0,
                     lambda _: self.joint_factory.marginalize_var2(joint_obs),
                     lambda _: self.joint_factory.marginalize_var1(joint_obs),
                     None
                 )
-                obs_likelihood = marginal_obs.prob(ego_observation)  # O(oi | s')
+                obs_likelihood = marginal_obs.prob(ego_observation)
 
-                def action_contribution(other_action):
-                    # Reconstruct joint action from known ego action + candidate other action
-                    joint_action = self.joint_action_constructor(self.agent_id, previous_ego_action, other_action)
+                # ∑_s T(s' | s, a) b(s)
+                def transition_contrib(state):
+                    return self.joint_transition_function(state, joint_action).prob(next_state) * ego_belief_distribution.prob(state)
 
-                    # ∑_s T(s' | s, a) b(s)
-                    def transition_contrib(state):
-                        return self.joint_transition_function(state, joint_action).prob(next_state) * ego_belief_distribution.prob(state)
+                transition_prior = jnp.sum(jax.vmap(transition_contrib)(jnp.arange(self.num_unique_states)))
 
-                    transition_prior = jnp.sum(jax.vmap(transition_contrib)(jnp.arange(self.num_unique_states)))
-                    return transition_prior * other_action_dist.prob(other_action)  # · π*(b̄_S)(a_other)
+                return obs_likelihood * transition_prior * other_action_dist.prob(other_action)
 
-                # ∑_{a_other} [T-weighted prior · π*(b̄_S)(a_other)]
-                marginalized_action_sum = jnp.sum(jax.vmap(action_contribution)(jnp.arange(self.num_unique_actions)))
-                return obs_likelihood * marginalized_action_sum * other_action_dist.prob(other_action)  # O(oi | s') · ∑_a [...]
-            
-            return jnp.sum(jax.vmap(if_other_took_action)(jnp.arange(self.num_unique_actions)))
+            return jnp.sum(jax.vmap(contribution_for_other_action)(jnp.arange(self.num_unique_actions)))
 
         probs = jax.vmap(state_likelihood)(jnp.arange(self.num_unique_states))
         return distrax.Categorical(probs=probs)
