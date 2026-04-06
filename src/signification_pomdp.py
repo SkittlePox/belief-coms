@@ -7,6 +7,7 @@ from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from functools import partial
 from belief_representations import *
 from distributions import *
+from model import *
 
 @struct.dataclass
 class State:
@@ -83,28 +84,14 @@ class ImageSigPOMDP(MultiAgentEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def _joint_transition_function(self, state_num, joint_action):
-        """ There are only 5 possible states. The initial state of 3 where nothing can happen, the final state 4 where you get reward, and then the states 0-2 corresponding to optimal actions 0-2
+        """ There are 3 possible states. States 0-2 corresponding to optimal actions 0-2
         """
-        # If you are in state 3, the initial state, there is a 1/3 chance of transition of states 0-2
         # If you are in states 0-2, depending on the receiver action you will either stay in the same state or transition to the final state (4)
-
         # This function should be represented as T(s'|s, a)
 
-        (sender_action, receiver_action) = joint_action
+        # (sender_action, receiver_action) = joint_action
 
-        def state_0_1_2():
-            idx = jax.lax.cond(state_num == receiver_action, lambda _: 4, lambda _: state_num, None)
-            probs = jnp.zeros(5).at[idx].set(1.0)
-            return probs
-
-        def state_3():
-            probs = jnp.zeros(5).at[0:3].set([1.0, 1.0, 1.0])
-            return probs/3
-
-        def state_4():
-            return jnp.zeros(5)
-
-        probs = jax.lax.switch(state_num, [state_0_1_2, state_0_1_2, state_0_1_2, state_3, state_4])
+        probs = jnp.zeros(3).at[state_num].set(1.0)
 
         return distrax.Categorical(probs=probs)
 
@@ -146,6 +133,9 @@ class ImageSigPOMDP(MultiAgentEnv):
             lambda _: (other_action, ego_action),
             None
         )
+    
+    def _joint_reward_function(self, state, joint_action, next_state):
+        return joint_action[0] == state
 
 
 def optimal_policy(belief_distribution: distrax.Categorical):
@@ -165,16 +155,10 @@ if __name__ == '__main__':
 
 
     ### Transition function tests
-    # Actions do nothing in initial state. 1/3 chance of ending up in 0, 1, or 2
-    print(env._joint_transition_function(3, (-1, 0)).probs)
-    print(env._joint_transition_function(3, (-1, 1)).probs)
 
     # In states 0, 1, 2 you either stay in your current state or get to the end state
     print(env._joint_transition_function(0, (-1, 0)).probs)
     print(env._joint_transition_function(0, (-1, 1)).probs)
-
-    # Nothing happens in the end state
-    print(env._joint_transition_function(4, (-1, 0)).probs)
 
     ### Observation function tests
     factory = JointCategoricalPair(vars_num_categories=(3, 3))
@@ -184,12 +168,12 @@ if __name__ == '__main__':
 
 
     ### Belief update test
-    initial_belief = distrax.Categorical(probs=jnp.zeros(5).at[0:3].set([1.0, 1.0, 1.0])/3)
+    initial_belief = distrax.Categorical(probs=jnp.ones(3))
     print(initial_belief.probs)
 
     belief_factory = CategoricalBeliefState(num_unique_states=3, num_unique_observations=3, num_unique_actions=4, joint_transition_function=env._joint_transition_function, joint_observation_function=env._joint_observation_function, joint_action_constructor=env._joint_action_constructor)
 
-    new_belief = belief_factory.update_with_observation_and_joint_action(initial_belief, 1, (-1, 3))
+    new_belief = belief_factory.update_with_observation_and_joint_action(initial_belief, 1, (-1, 3), 0)
     print(new_belief.probs)
 
     uniform_belief = distrax.Categorical(probs=jnp.ones(3))
@@ -197,6 +181,12 @@ if __name__ == '__main__':
     # their_beliefs = belief_factory.update_with_observation(uniform_belief, uniform_belief, 1, 4, optimal_policy)
 
     print(initial_belief.probs)
-    their_beliefs = belief_factory.update_other_belief_estimate_with_observation_only(initial_belief, 0, 3, optimal_policy) # Prob for index 1 should be non-zero!
-
+    their_beliefs = belief_factory.update_other_belief_estimate_with_observation_only(initial_belief, 0, 3, optimal_policy) # Prob for index 0 should be highest actually, because they cannot see 0
     print(their_beliefs.probs)
+
+
+    model = DecPOMDPModel(env._joint_transition_function, env._joint_reward_function, env._joint_observation_function, env._joint_action_constructor, 3, 3, 4)
+
+    cum_ret = model.evaluate_expected_returns(0, optimal_policy, optimal_policy, new_belief, initial_belief, belief_factory)
+    print(cum_ret)
+

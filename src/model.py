@@ -21,7 +21,6 @@ class DecPOMDPModel:
         self.num_unique_observations = num_unique_observations
         self.num_unique_actions = num_unique_actions
 
-    # NOTE: I need to double-check this function.
     def evaluate_expected_returns(
         self,
         state,
@@ -31,7 +30,7 @@ class DecPOMDPModel:
         other_belief,
         belief_state_factory,
         ego_agent_id=0,
-        evaluation_depth=2,
+        evaluation_depth=4,
         discount_factor=0.9,
     ):
         """Evaluate the ego agent's expected discounted return from a given state.
@@ -150,7 +149,7 @@ class DecPOMDPModel:
                             )
 
                         future = future + jnp.sum(
-                            jax.vmap(per_next_state)(jnp.arange(self.num_unique_states))
+                            jnp.nan_to_num(jax.vmap(per_next_state)(jnp.arange(self.num_unique_states)))
                         )
 
                 return (immediate + discount_factor * future) * other_action_dist.prob(
@@ -162,3 +161,4 @@ class DecPOMDPModel:
             ) * ego_action_dist.prob(ego_action)
 
         return jnp.sum(jax.vmap(as_if_ego_acts)(jnp.arange(self.num_unique_actions)))
+
