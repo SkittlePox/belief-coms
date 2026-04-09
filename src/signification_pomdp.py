@@ -129,7 +129,7 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
         self.initial_belief_distribution = initial_belief_distribution
         self.belief_factory = belief_factory
 
-        self.null_belief_distribution = jnp.zeros_like(self.initial_belief_distribution)
+        self.null_belief_distribution = distrax.Categorical(probs=jnp.zeros_like(self.initial_belief_distribution.probs))
         self.null_utterance = jnp.zeros(5)
 
     @partial(jax.jit, static_argnums=(0,))
@@ -259,8 +259,8 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
                 lambda _: agent_0_belief_action,
                 None,
             )
-            agent_0_underlying_action = self.underlying_env._agent_0_optimal_policy(
-                agent_0_present_belief
+            agent_0_underlying_action = jnp.argmax(
+                self.underlying_env._agent_0_optimal_policy(agent_0_present_belief).probs
             )
 
             agent_1_present_belief = jax.lax.cond(
@@ -269,8 +269,8 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
                 lambda _: agent_1_belief_action,
                 None,
             )
-            agent_1_underlying_action = self.underlying_env._agent_1_optimal_policy(
-                agent_1_present_belief
+            agent_1_underlying_action = jnp.argmax(
+                self.underlying_env._agent_1_optimal_policy(agent_1_present_belief).probs
             )
 
             joint_action = self.underlying_env._joint_action_constructor(
@@ -376,7 +376,7 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
                 done_flag,
             )
 
-        return jax.lax.switch(state.message_status, [message_unsent, message_sent])
+        return jax.lax.switch(state.message_status, [message_unsent, message_sent], None)
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key: chex.PRNGKey):
@@ -403,8 +403,7 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
         """
         (
             initial_underlying_state,
-            agent_0_world_observation,
-            agent_1_world_observation,
+            (agent_0_world_observation, agent_1_world_observation),
         ) = self.underlying_env.reset(key)
 
         agent_0_belief_state = (
@@ -459,3 +458,70 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
         )
 
         return (initial_environment_state, self.get_obs(key, initial_environment_state))
+
+
+if __name__ == "__main__":
+    from guessing_game import GuessingGame
+    from belief_representations import CategoricalBeliefState
+
+    key = jax.random.key(0)
+
+    # --- Build underlying env and belief factory ---
+    underlying_env = GuessingGame()
+    initial_belief = distrax.Categorical(probs=jnp.ones(3) / 3)
+    belief_factory = CategoricalBeliefState(
+        num_unique_states=3,
+        num_unique_observations=3,
+        num_unique_actions=4,
+        joint_transition_function=underlying_env._joint_transition_function,
+        joint_observation_function=underlying_env._joint_observation_function,
+        joint_action_constructor=underlying_env._joint_action_constructor,
+    )
+
+    env = SignificationPOMDPGuessingGame(underlying_env, initial_belief, belief_factory)
+
+    # --- Reset ---
+    key, reset_key = jax.random.split(key)
+    state, (obs_0, obs_1) = env.reset(reset_key)
+
+    print("=== Initial state ===")
+    print(f"  sender_agent:       {state.sender_agent}")
+    print(f"  message_status:     {state.message_status}")
+    print(f"  agent_0_belief:     {state.agent_0_belief_state.probs}")
+    print(f"  agent_1_belief:     {state.agent_1_belief_state.probs}")
+    print(f"  agent_0s_est_of_agent_1s_belief:  {state.agent_0s_estimate_of_agent_1s_belief_state.probs}")
+    print(f"  agent_1s_est_of_agent_0s_belief:  {state.agent_1s_estimate_of_agent_0s_belief_state.probs}")
+    print(f"  underlying obs:     {state.underlying_state.agent_0_world_observation}, {state.underlying_state.agent_1_world_observation}")
+
+    # --- Run one full round (utterance phase + action phase) ---
+    for phase in range(2):
+        key, step_key = jax.random.split(key)
+
+        # Agents pass through their current beliefs unchanged (no policy yet)
+        # and send a zero utterance.
+        agent_0_actions = (
+            jnp.zeros(5),                                             # utterance
+            state.agent_0_belief_state,                               # belief update
+            state.agent_0s_estimate_of_agent_1s_belief_state,        # estimate of other's belief post-utterance
+        )
+        agent_1_actions = (
+            jnp.zeros(5),
+            state.agent_1_belief_state,
+            state.agent_1s_estimate_of_agent_0s_belief_state,
+        )
+
+        state, (obs_0, obs_1), rewards, done = env.step_env(
+            step_key, state, (agent_0_actions, agent_1_actions)
+        )
+
+        label = "Utterance phase" if phase == 0 else "Action phase"
+        print(f"\n=== After step {phase + 1} ({label}) ===")
+        print(f"  message_status:     {state.message_status}")
+        print(f"  done:               {done}")
+        print(f"  rewards:            {rewards}")
+        print(f"  agent_0_belief:     {state.agent_0_belief_state.probs}")
+        print(f"  agent_1_belief:     {state.agent_1_belief_state.probs}")
+        print(f"  agent_0_belief_action_post_utterance:  {state.agent_0_belief_action_post_utterance_from_previous_state.probs}")
+        print(f"  agent_1_belief_action_post_utterance:  {state.agent_1_belief_action_post_utterance_from_previous_state.probs}")
+        print(f"  agent_0s_est_of_agent_1s_belief:  {state.agent_0s_estimate_of_agent_1s_belief_state.probs}")
+        print(f"  agent_1s_est_of_agent_0s_belief:  {state.agent_1s_estimate_of_agent_0s_belief_state.probs}")
