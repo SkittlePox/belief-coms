@@ -18,7 +18,7 @@ class State:
 
     optimal_receiver_action: chex.Array     # This is an integer corresponding to the optimal receiver action
 
-    final_state: chex.Array
+    done: chex.Array
 
 
 class GuessingGame(MultiAgentEnv):
@@ -33,9 +33,9 @@ class GuessingGame(MultiAgentEnv):
         # There are only three possible discrete observations, plus the sender_signal_image is sent to the receiver
         return state.agent_0_world_observation, state.agent_1_world_observation
     
-    def step_env(self, key: chex.PRNGKey, state: State, actions: chex.Array):
+    def step_env(self, key: chex.PRNGKey, state: State, joint_action: chex.Array):
         # Actions are sent in the order (agent_0, agent_1) and are shape (1) and (1)
-        agent_0_action, agent_1_action = actions
+        agent_0_action, agent_1_action = joint_action
 
         receiver_action = jax.lax.cond(state.sender_agent == 0, lambda _: agent_1_action, lambda _: agent_0_action, None)
         agent_reward = jax.lax.cond(receiver_action == state.optimal_receiver_action, lambda _: 1.0, lambda _: -1.0, None)
@@ -48,10 +48,10 @@ class GuessingGame(MultiAgentEnv):
 
             optimal_receiver_action=state.optimal_receiver_action,
 
-            final_state=jnp.array(1),
+            done=jnp.array(1),
         )
         
-        return next_environment_state, self.get_obs(key, next_environment_state), (agent_reward, agent_reward), next_environment_state.final_state
+        return next_environment_state, self.get_obs(key, next_environment_state), (agent_reward, agent_reward), next_environment_state.done
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key: chex.PRNGKey, sender_agent=jnp.array(-1), agent_world_observations_and_optimal_action=jnp.array([-1, -1, -1])):
@@ -71,7 +71,7 @@ class GuessingGame(MultiAgentEnv):
 
             optimal_receiver_action=agent_world_observations_and_optimal_action[2],
             
-            final_state=jnp.array(0)
+            done=jnp.array(0)
         )
 
         return (initial_environment_state, self.get_obs(key, initial_environment_state))
@@ -132,6 +132,20 @@ class GuessingGame(MultiAgentEnv):
         return joint_action[0] == state
 
     def _optimal_policy(self, belief_distribution: distrax.Categorical):
+        """ Returns a probability distribution over possible actions in the DecPOMDP.
+        belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
+        """
+        # The optimal action distribution is the same as the belief distribution...
+        return belief_distribution
+    
+    def _agent_0_optimal_policy(self, belief_distribution: distrax.Categorical):
+        """ Returns a probability distribution over possible actions in the DecPOMDP.
+        belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
+        """
+        # The optimal action distribution is the same as the belief distribution...
+        return belief_distribution
+    
+    def _agent_1_optimal_policy(self, belief_distribution: distrax.Categorical):
         """ Returns a probability distribution over possible actions in the DecPOMDP.
         belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
         """

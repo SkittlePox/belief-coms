@@ -82,7 +82,7 @@ class CategoricalBeliefState:
         other_belief_distribution_estimate: distrax.Categorical, 
         ego_observation, 
         previous_ego_action, 
-        optimal_policy, 
+        other_optimal_policy,
         agent_id = 0
     ):
         """Perform a Bayesian belief update when the other agent's action is unobserved.
@@ -104,17 +104,17 @@ class CategoricalBeliefState:
         Args:
             ego_belief_distribution: The ego agent's current belief b(s) as a distrax.Categorical.
             other_belief_distribution_estimate: An estimate of other agent's current belief b̄_S, passed to
-                optimal_policy to obtain a distribution over their actions.
+                other_optimal_policy to obtain a distribution over their actions.
             ego_observation: The observation received by the ego agent at this timestep.
             previous_ego_action: The ego agent's own action at the previous timestep (known).
-            optimal_policy: A callable π* that takes a belief distribution and returns a
+            other_optimal_policy: A callable π* that takes a belief distribution and returns a
                 distrax.Categorical over the other agent's actions.
 
         Returns:
             A new distrax.Categorical representing the updated belief b'(s').
         """
         # π*(b̄_S) — other agent's action distribution under their optimal policy
-        other_action_dist = optimal_policy(other_belief_distribution_estimate)
+        other_action_dist = other_optimal_policy(other_belief_distribution_estimate)
 
         def state_likelihood(next_state):
             def contribution_for_other_action(other_action):
@@ -148,7 +148,7 @@ class CategoricalBeliefState:
         other_belief_distribution_estimate: distrax.Categorical,
         ego_observation,
         previous_ego_action,
-        optimal_policy,
+        other_optimal_policy,
         agent_id = 0
     ):
         """Update the ego agent's estimate of the other agent's belief state.
@@ -174,13 +174,13 @@ class CategoricalBeliefState:
                 other agent's belief b̄(s), as a distrax.Categorical over states.
             ego_observation: The observation received by the ego agent at this timestep.
             previous_ego_action: The ego agent's action at the previous timestep.
-            optimal_policy: A callable π* mapping a belief distribution to a
+            other_optimal_policy: A callable π* mapping a belief distribution to a
                 distrax.Categorical over the other agent's actions.
 
         Returns:
             A new distrax.Categorical representing the updated estimate b̄'(s').
         """
-        other_action_dist = optimal_policy(other_belief_distribution_estimate)
+        other_action_dist = other_optimal_policy(other_belief_distribution_estimate)
 
         def as_if_other_took_action(other_action):
             joint_action = self.joint_action_constructor(agent_id, previous_ego_action, other_action)
