@@ -25,6 +25,8 @@ class BeliefActor(nn.Module):
     structurally prevents the agent from placing mass on states it was certain
     were impossible.
 
+    L(utterance | s) is essentially a denotational semantics.
+
     The resulting log b' is used as the concentration parameter of a Dirichlet
     (after shifting to be positive), so samples are belief states on the simplex.
 

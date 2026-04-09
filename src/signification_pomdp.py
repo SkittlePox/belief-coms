@@ -1,192 +1,141 @@
-from mimetypes import init
 import jax, chex
-import copy
 import jax.numpy as jnp
-from flax import struct
+import distrax
 from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from functools import partial
-from belief_representations import *
-from distributions import *
-from model import *
+from flax import struct
+from guessing_game import State
 
+# This is not as efficient as signification game because each state needs to be iterated on twice before actions in the underlying env are taken
 @struct.dataclass
-class State:
-    sender_agent: chex.Array            # Either a 0 or 1 corresponding to agent 0 or agent 1
+class AugmentedState:
+    underlying_state: State     # State from GuessingGame
+    sender_agent: chex.Array
 
-    sender_signal_image: chex.Array     # The rendered image shown to the receiver
-    sender_signal_action: chex.Array    # The action the sender took (which will be rendered and shown to receiver)
-    
-    agent_0_world_observation: chex.Array   # This is an integer corresponding to an observation
-    agent_1_world_observation: chex.Array
+    agent_0_utterance_action: chex.Array        # May eventually include an RNG key to render the utterance action
+    agent_0_belief_action: chex.Array
 
-    optimal_receiver_action: chex.Array     # This is an integer corresponding to the optimal receiver action
+    agent_1_utterance_action: chex.Array
+    agent_1_belief_action: chex.Array
 
-    final_state: chex.Array
+    agent_0_belief_state: distrax.Categorical
+    agent_1_belief_state: distrax.Categorical
+
+    agent_0s_estimate_of_agent_1s_belief_state: distrax.Categorical
+    agent_1s_estimate_of_agent_0s_belief_state: distrax.Categorical
+
+    message_status: chex.Array  # 0: unsent, 1: sent, 2: read
 
 
-class ImageSigPOMDP(MultiAgentEnv):
-    def __init__(self) -> None:
+
+class SignificationPOMDPGuessingGame(MultiAgentEnv):
+    """
+    This is a POMDP centered around communicative actions.
+    It accepts an underlying decision process and interleaves communication between timesteps.
+    Handles belief updates automatically.
+    Assumes communication only happens in one direction from sender to receiver.
+    """
+
+    def __init__(self, downstairs_env, initial_belief_distribution, belief_factory) -> None:
         super().__init__(num_agents=2)
+        self.underlying_env = downstairs_env
+        self.initial_belief_distribution = initial_belief_distribution
+        self.belief_factory = belief_factory
 
     @partial(jax.jit, static_argnums=(0,))
-    def get_obs(self, key: chex.PRNGKey, state: State):
-        # There are only three possible discrete observations, plus the sender_signal_image is sent to the receiver
-        return state.agent_0_world_observation, state.agent_1_world_observation, state.sender_signal_image
-    
-    def step_env(self, key: chex.PRNGKey, state: State, actions: chex.Array):
-        # Actions are sent in the order (receiver action, sender action) and are shape ((1), (28))
-        receiver_action, sender_action = actions
-        
-        # 3 is the wait action!
-        agent_reward = jax.lax.cond(receiver_action == 3, lambda _: -0.1, jax.lax.cond(receiver_action == state.optimal_receiver_action, lambda _: 1.0, lambda _: -0.1, None), None)
+    def get_obs(self, key: chex.PRNGKey, state: AugmentedState):
+        """
+        Each agent gets their belief state I think... Should they also have the belief estimate of the other agent??
+        """
+        return (state.agent_0_belief_state, state.agent_0s_estimate_of_agent_1s_belief_state), (state.agent_1_belief_state, state.agent_1s_estimate_of_agent_0s_belief_state)
 
-        next_environment_state = State(
-            sender_agent=state.sender_agent,
+    def step_env(self, key: chex.PRNGKey, state: AugmentedState, actions: chex.Array):
+        agent_0_actions, agent_1_actions = actions
+        agent_0_utterance_action, agent_0_belief_action = agent_0_actions
+        agent_1_utterance_action, agent_1_belief_action = agent_1_actions
 
-            sender_signal_image=jnp.zeros(32, 32),  # We need to render the speaker action into an image here.
-            sender_signal_action=sender_action,
 
-            agent_0_world_observation=state.agent_0_world_observation,
-            agent_1_world_observation=state.agent_1_world_observation,
 
-            optimal_receiver_action=state.optimal_receiver_action,
+        # If the message has been read we need to execute the action... if not we need to pass it back to the agents...
 
-            final_state=agent_reward == 1.0,
-        )
-        
-        return next_environment_state, self.get_obs(key, next_environment_state, (agent_reward, agent_reward), next_environment_state.final_state)
+        def message_unsent(_):
+            # The sender has generated an utterance to send based on its belief state and its estimate of the receiver's belief state
+            # We need to add that into the state, flip the bit, and move on
+            next_environment_state = AugmentedState(
+                underlying_state=state.underlying_state,
+                sender_agent=state.sender_agent,
 
-    @partial(jax.jit, static_argnums=(0,))
-    def reset(self, key: chex.PRNGKey, sender_agent=jnp.array(-1), agent_world_observations_and_optimal_action=jnp.array([-1, -1, -1])):
-        # Agent role selection (sender or receiver)
-        sender_agent_key, key = jax.random.split(key)
-        sender_agent = jax.lax.cond(sender_agent == jnp.array(-1), lambda _: jax.random.randint(sender_agent_key, (1), 0, 2)[0], lambda _: sender_agent, None) # Choose a value of shape (1) between 0 and 1 inclusive, corresponding to agent 0 or agent 1
+                agent_0_utterance_action=agent_0_utterance_action,
+                agent_0_belief_action=agent_0_belief_action,
 
-        # Agent world observation selection (A, B, or C, corresponding to 0, 1, or 2)
-        observation_key, key = jax.random.split(key)
-        agent_world_observations_and_optimal_action = jax.lax.cond(jnp.array_equal(agent_world_observations_and_optimal_action, jnp.array([-1, -1, -1])), lambda _: jax.random.permutation(observation_key, jnp.arange(3)), lambda _: agent_world_observations_and_optimal_action, None)
+                agent_1_utterance_action=agent_1_utterance_action,
+                agent_1_belief_action=agent_1_belief_action,
 
-        initial_environment_state = State(
-            sender_agent=sender_agent,
+                agent_0_belief_state=agent_0_belief_action,
+                agent_1_belief_state=agent_1_belief_action,
 
-            sender_signal_image=jnp.zeros((32, 32)),
-            sender_signal_action=jnp.zeros(28),
+                agent_0s_estimate_of_agent_1s_belief_state=state.agent_0s_estimate_of_agent_1s_belief_state,  # This should probably update but it's kind of irrelevant for this specific 1-step environment
+                agent_1s_estimate_of_agent_0s_belief_state=state.agent_1s_estimate_of_agent_0s_belief_state,
 
-            agent_0_world_observation=agent_world_observations_and_optimal_action[0],
-            agent_1_world_observation=agent_world_observations_and_optimal_action[1],
+                message_status=jnp.array(1)
+            )
+ 
+            return next_environment_state, self.get_obs(key, next_environment_state), (0.0, 0.0)
 
-            optimal_receiver_action=agent_world_observations_and_optimal_action[2],
+        def message_sent(_):
+            # The utterance must be sent to the receiver agent now to be updated...
+            next_environment_state = AugmentedState(
+                underlying_state=state.underlying_state,
+                sender_agent=state.sender_agent,
+
+                agent_0_utterance_action=agent_0_utterance_action,
+                agent_0_belief_action=agent_0_belief_action,
+
+                agent_1_utterance_action=agent_1_utterance_action,
+                agent_1_belief_action=agent_1_belief_action,
+
+                agent_0_belief_state=agent_0_belief_action,
+                agent_1_belief_state=agent_1_belief_action,
+
+                agent_0s_estimate_of_agent_1s_belief_state=state.agent_0s_estimate_of_agent_1s_belief_state,  # This should probably update but it's kind of irrelevant for this specific 1-step environment
+                agent_1s_estimate_of_agent_0s_belief_state=state.agent_1s_estimate_of_agent_0s_belief_state,
+
+                message_status=jnp.array(1)
+            )
             
-            final_state=jnp.array(0)
+        def message_read(_):
+            pass
+
+        return jax.lax.switch(state.message_status, [message_unsent, message_sent, message_read])
+
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, key: chex.PRNGKey):
+        initial_underlying_state, agent_0_world_observation, agent_1_world_observation = self.underlying_env.reset(key)
+
+        agent_0_belief_state = self.belief_factory.update_with_observation_and_joint_action(self.initial_belief_distribution, agent_0_world_observation, previous_joint_action=(-1, -1), agent_id=0)
+        agent_1_belief_state = self.belief_factory.update_with_observation_and_joint_action(self.initial_belief_distribution, agent_1_world_observation, previous_joint_action=(-1, -1), agent_id=1)
+
+        agent_0s_estimate_of_agent_1s_belief_state = self.belief_factory.update_other_belief_estimate_with_observation_only(self.initial_belief_distribution, agent_0_world_observation, 0, self.underlying_env._optimal_policy, agent_id=0)
+        agent_1s_estimate_of_agent_0s_belief_state = self.belief_factory.update_other_belief_estimate_with_observation_only(self.initial_belief_distribution, agent_1_world_observation, 0, self.underlying_env._optimal_policy, agent_id=1)
+
+        initial_environment_state = AugmentedState(
+            underlying_state=initial_underlying_state,
+            sender_agent=initial_underlying_state.sender_agent,
+
+            agent_0_utterance_action=jnp.zeros(5),
+            agent_0_belief_action=jnp.ones_like(self.initial_belief_distribution),
+
+            agent_1_utterance_action=jnp.zeros(5),
+            agent_1_belief_action=jnp.ones_like(self.initial_belief_distribution),
+
+            agent_0_belief_state=agent_0_belief_state,
+            agent_1_belief_state=agent_1_belief_state,
+
+            agent_0s_estimate_of_agent_1s_belief_state=agent_0s_estimate_of_agent_1s_belief_state,
+            agent_1s_estimate_of_agent_0s_belief_state=agent_1s_estimate_of_agent_0s_belief_state,
+
+            message_status=jnp.array(0)
         )
 
         return (initial_environment_state, self.get_obs(key, initial_environment_state))
-
-    @partial(jax.jit, static_argnums=(0,))
-    def _joint_transition_function(self, state_num, joint_action):
-        """ There are 3 possible states. States 0-2 corresponding to optimal actions 0-2
-        """
-        # If you are in states 0-2, depending on the receiver action you will either stay in the same state or transition to the final state (4)
-        # This function should be represented as T(s'|s, a)
-
-        # (sender_action, receiver_action) = joint_action
-
-        probs = jnp.zeros(3).at[state_num].set(1.0)
-
-        return distrax.Categorical(probs=probs)
-
-    @partial(jax.jit, static_argnums=(0,))
-    def _joint_observation_function(self, state_num, joint_action):
-        """ There are only 3 environment observations: A, B, C corresponding to 0, 1, 2
-        """
-        # This function should be represented as O(o1, o2|s), a 2D categorical distribution, dim 3
-        #                       Agent 0
-        #                  A       B       C
-        #              +-------+-------+-------+
-        #            A | (0,0) | (0,1) | (0,2) |
-        #              +-------+-------+-------+
-        #  Agent 1   B | (1,0) | (1,1) | (1,2) |
-        #              +-------+-------+-------+
-        #            C | (2,0) | (2,1) | (2,2) |
-        #              +-------+-------+-------+
-        #                 (agent 0, agent 1)
-        
-        # 3 by 3 grid = 9 probabilities
-        
-
-        def state_0():
-            return jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.5, 0.0])
-        
-        def state_1():
-            return jnp.array([0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0])
-        
-        def state_2():
-            return jnp.array([0.0, 0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
-
-        probs = jax.lax.switch(state_num, [state_0, state_1, state_2])  # These are the only states that matter I think...
-        return distrax.Categorical(probs=probs)
-
-    def _joint_action_constructor(self, agent_id, ego_action, other_action):
-        return jax.lax.cond(
-            agent_id == 0,
-            lambda _: (ego_action, other_action),
-            lambda _: (other_action, ego_action),
-            None
-        )
-    
-    def _joint_reward_function(self, state, joint_action, next_state):
-        return joint_action[0] == state
-
-
-def optimal_policy(belief_distribution: distrax.Categorical):
-    """ Returns a probability distribution over possible actions in the DecPOMDP.
-    belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
-    """
-    # I'm not sure how to write this for arbitrary distributions...
-    # The funny thing is I think in this case it's actually literally just the belief distribution! The optimal action distribution is the same as the belief distribution here...
-    return belief_distribution
-        
-
-if __name__ == '__main__':
-    env = ImageSigPOMDP()
-    key = jax.random.key(10)
-    env_state, observations = env.reset(key)
-    print(env_state)
-
-
-    ### Transition function tests
-
-    # In states 0, 1, 2 you either stay in your current state or get to the end state
-    print(env._joint_transition_function(0, (-1, 0)).probs)
-    print(env._joint_transition_function(0, (-1, 1)).probs)
-
-    ### Observation function tests
-    factory = JointCategoricalPair(vars_num_categories=(3, 3))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(0, 0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(1, 0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(2, 0)))
-
-
-    ### Belief update test
-    initial_belief = distrax.Categorical(probs=jnp.ones(3))
-    print(initial_belief.probs)
-
-    belief_factory = CategoricalBeliefState(num_unique_states=3, num_unique_observations=3, num_unique_actions=4, joint_transition_function=env._joint_transition_function, joint_observation_function=env._joint_observation_function, joint_action_constructor=env._joint_action_constructor)
-
-    new_belief = belief_factory.update_with_observation_and_joint_action(initial_belief, 1, (-1, 3), 0)
-    print(new_belief.probs)
-
-    uniform_belief = distrax.Categorical(probs=jnp.ones(3))
-    
-    # their_beliefs = belief_factory.update_with_observation(uniform_belief, uniform_belief, 1, 4, optimal_policy)
-
-    print(initial_belief.probs)
-    their_beliefs = belief_factory.update_other_belief_estimate_with_observation_only(initial_belief, 0, 3, optimal_policy) # Prob for index 0 should be highest actually, because they cannot see 0
-    print(their_beliefs.probs)
-
-
-    model = DecPOMDPModel(env._joint_transition_function, env._joint_reward_function, env._joint_observation_function, env._joint_action_constructor, 3, 3, 4)
-
-    cum_ret = model.evaluate_expected_returns(0, optimal_policy, optimal_policy, new_belief, initial_belief, belief_factory)
-    print(cum_ret)
-
