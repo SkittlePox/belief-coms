@@ -4,15 +4,15 @@ import distrax
 from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from functools import partial
 from flax import struct
-from guessing_game import State
+from typing import Any
 
 
 # This is not as efficient as signification game because each state needs to be iterated on twice before actions in the underlying env are taken
-# I will eventually double-up on this I think...
+# I will eventually double-up on this I think... Actually I'm not sure it really matters...
 @struct.dataclass
 class AugmentedState:
     """
-    Full state of the SignificationPOMDPGuessingGame, augmenting the underlying GuessingGame
+    Full state of the SignificationPOMDP, augmenting the underlying environment
     state with communication and belief-tracking fields.
 
     Each environment step is split into two micro-steps gated by ``message_status``:
@@ -26,7 +26,7 @@ class AugmentedState:
     Fields
     ------
     underlying_state:
-        The current state of the wrapped GuessingGame environment.
+        The current state of the wrapped environment (any flax struct).
     sender_agent:
         Integer (0 or 1) indicating which agent is the sender this round.
     agent_0_utterance_action:
@@ -56,16 +56,18 @@ class AugmentedState:
         1 when the episode has terminated, 0 otherwise.
     """
 
-    underlying_state: State  # State from GuessingGame
+    underlying_state: Any
     sender_agent: chex.Array
 
     # May eventually include an RNG key to render the utterance action
     agent_0_utterance_action: chex.Array  ## Used only when sender_agent == agent_0
+    agent_0_utterance_rendering_rng: chex.Array
     agent_1_belief_action_post_utterance_from_previous_state: (
         chex.Array
     )  ## Used only when sender_agent == agent_0, and kept only for logging
     #
     agent_1_utterance_action: chex.Array  ## Used only when sender_agent == agent_1
+    agent_1_utterance_rendering_rng: chex.Array
     agent_0_belief_action_post_utterance_from_previous_state: (
         chex.Array
     )  ## Used only when sender_agent == agent_1, and kept only for logging
@@ -81,7 +83,7 @@ class AugmentedState:
     done: chex.Array
 
 
-class SignificationPOMDPGuessingGame(MultiAgentEnv):
+class SignificationPOMDP(MultiAgentEnv):
     """
     A two-agent POMDP that wraps an underlying decision process (e.g. GuessingGame)
     and interleaves one round of directed communication before each environment step.
@@ -102,18 +104,33 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
        beliefs are updated for both agents (own belief and estimate of other's belief),
        and ``message_status`` resets to 0 for the next round.
 
-    Assumptions
-    -----------
-    * Communication is strictly unidirectional (sender → receiver) each round.
-    * The underlying environment exposes ``_agent_0_optimal_policy``,
-      ``_agent_1_optimal_policy``, and ``_joint_action_constructor``.
-    * ``belief_factory`` implements ``update_with_observation_only`` and
-      ``update_other_belief_estimate_with_observation_only``.
+    Underlying environment requirements
+    ------------------------------------
+    The wrapped env must subclass ``MultiAgentEnv`` and implement:
+
+    * **``state.sender_agent``** — integer field (0 or 1) on the state struct indicating
+      the current sender; rotated each episode by the env.
+    * **``reset(key) -> (state, (obs_0, obs_1))``** — standard reset returning per-agent
+      observations as a 2-tuple.
+    * **``step_env(key, state, joint_action) -> (state, (obs_0, obs_1), rewards, done)``**
+      — standard step; ``joint_action`` will be a tuple of two integer scalar actions.
+    * **``_agent_0_optimal_policy(belief) -> distrax.Categorical``** and
+      **``_agent_1_optimal_policy(belief) -> distrax.Categorical``** — deterministic or
+      stochastic policies over the action space given a belief state.
+    * **``_joint_action_constructor(agent_id, ego_action, other_action) -> joint_action``**
+      — assembles a joint action tuple from ego/other integer actions, respecting agent
+      ordering.  Must be compatible with ``jax.lax.cond`` (same output structure from
+      both branches).
+
+    ``belief_factory`` must implement ``update_with_observation_only`` and
+    ``update_other_belief_estimate_with_observation_only``.
 
     Parameters
     ----------
     underlying_env:
         The underlying ``MultiAgentEnv`` (e.g. ``GuessingGame``) to wrap.
+    utterance_size:
+        Dimensionality of the utterance vector.
     initial_belief_distribution:
         A probability array (shape matching the state space) used as the prior belief
         at the start of each episode.
@@ -122,7 +139,7 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
     """
 
     def __init__(
-        self, underlying_env, initial_belief_distribution, belief_factory
+        self, underlying_env, utterance_size, initial_belief_distribution, belief_factory
     ) -> None:
         super().__init__(num_agents=2)
         self.underlying_env = underlying_env
@@ -130,7 +147,8 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
         self.belief_factory = belief_factory
 
         self.null_belief_distribution = distrax.Categorical(probs=jnp.zeros_like(self.initial_belief_distribution.probs))
-        self.null_utterance = jnp.zeros(5)
+        self.null_utterance = jnp.zeros(utterance_size)
+        self.null_utterance_rendering_rng = jax.random.key(0)
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: AugmentedState):
@@ -199,12 +217,14 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
         agent_0_actions, agent_1_actions = actions
         (
             agent_0_utterance_action,
-            agent_0_belief_action,
+            agent_0_utterance_rendering_rng,
+            agent_0_belief_action_post_utterance,
             agent_0s_estimate_of_agent_1s_belief_post_utterance,
         ) = agent_0_actions
         (
             agent_1_utterance_action,
-            agent_1_belief_action,
+            agent_1_utterance_rendering_rng,
+            agent_1_belief_action_post_utterance,
             agent_1s_estimate_of_agent_0s_belief_post_utterance,
         ) = agent_1_actions
 
@@ -224,6 +244,12 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
                     lambda _: self.null_utterance,
                     None,
                 ),
+                agent_0_utterance_rendering_rng=jax.lax.cond(
+                    state.sender_agent == jnp.array(0),
+                    lambda _: agent_0_utterance_rendering_rng,
+                    lambda _: self.null_utterance_rendering_rng,
+                    None,
+                ),
                 agent_0_belief_action_post_utterance_from_previous_state=self.null_belief_distribution,
                 agent_1_utterance_action=jax.lax.cond(
                     state.sender_agent == jnp.array(1),
@@ -231,9 +257,15 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
                     lambda _: self.null_utterance,
                     None,
                 ),
+                agent_1_utterance_rendering_rng=jax.lax.cond(
+                    state.sender_agent == jnp.array(1),
+                    lambda _: agent_1_utterance_rendering_rng,
+                    lambda _: self.null_utterance_rendering_rng,
+                    None,
+                ),
                 agent_1_belief_action_post_utterance_from_previous_state=self.null_belief_distribution,
-                agent_0_belief_state=agent_0_belief_action,
-                agent_1_belief_state=agent_1_belief_action,
+                agent_0_belief_state=agent_0_belief_action_post_utterance,
+                agent_1_belief_state=agent_1_belief_action_post_utterance,
                 agent_0s_estimate_of_agent_1s_belief_state=state.agent_0s_estimate_of_agent_1s_belief_state,
                 agent_1s_estimate_of_agent_0s_belief_state=state.agent_1s_estimate_of_agent_0s_belief_state,
                 message_status=jnp.array(1),
@@ -256,7 +288,7 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
             agent_0_present_belief = jax.lax.cond(
                 state.sender_agent == jnp.array(0),
                 lambda _: state.agent_0_belief_state,
-                lambda _: agent_0_belief_action,
+                lambda _: agent_0_belief_action_post_utterance,
                 None,
             )
             agent_0_underlying_action = jnp.argmax(
@@ -266,7 +298,7 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
             agent_1_present_belief = jax.lax.cond(
                 state.sender_agent == jnp.array(1),
                 lambda _: state.agent_1_belief_state,
-                lambda _: agent_1_belief_action,
+                lambda _: agent_1_belief_action_post_utterance,
                 None,
             )
             agent_1_underlying_action = jnp.argmax(
@@ -348,16 +380,18 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
                 underlying_state=next_underlying_state,
                 sender_agent=next_underlying_state.sender_agent,
                 agent_0_utterance_action=self.null_utterance,
+                agent_0_utterance_rendering_rng=self.null_utterance_rendering_rng,
                 agent_1_belief_action_post_utterance_from_previous_state=jax.lax.cond(
                     state.sender_agent == jnp.array(0),
-                    lambda _: agent_1_belief_action,
+                    lambda _: agent_1_belief_action_post_utterance,
                     lambda _: self.null_belief_distribution,
                     None,
                 ),
                 agent_1_utterance_action=self.null_utterance,
+                agent_1_utterance_rendering_rng=self.null_utterance_rendering_rng,
                 agent_0_belief_action_post_utterance_from_previous_state=jax.lax.cond(
                     state.sender_agent == jnp.array(1),
-                    lambda _: agent_0_belief_action,
+                    lambda _: agent_0_belief_action_post_utterance,
                     lambda _: self.null_belief_distribution,
                     None,
                 ),
@@ -446,8 +480,10 @@ class SignificationPOMDPGuessingGame(MultiAgentEnv):
             underlying_state=initial_underlying_state,
             sender_agent=initial_underlying_state.sender_agent,
             agent_0_utterance_action=self.null_utterance,
+            agent_0_utterance_rendering_rng=self.null_utterance_rendering_rng,
             agent_1_belief_action_post_utterance_from_previous_state=self.null_belief_distribution,
             agent_1_utterance_action=self.null_utterance,
+            agent_1_utterance_rendering_rng=self.null_utterance_rendering_rng,
             agent_0_belief_action_post_utterance_from_previous_state=self.null_belief_distribution,
             agent_0_belief_state=agent_0_belief_state,
             agent_1_belief_state=agent_1_belief_state,
@@ -478,7 +514,7 @@ if __name__ == "__main__":
         joint_action_constructor=underlying_env._joint_action_constructor,
     )
 
-    env = SignificationPOMDPGuessingGame(underlying_env, initial_belief, belief_factory)
+    env = SignificationPOMDP(underlying_env, utterance_size=5, initial_belief_distribution=initial_belief, belief_factory=belief_factory)
 
     # --- Reset ---
     key, reset_key = jax.random.split(key)
@@ -501,11 +537,13 @@ if __name__ == "__main__":
         # and send a zero utterance.
         agent_0_actions = (
             jnp.zeros(5),                                             # utterance
+            key,                                                      # utterance rendering rng key
             state.agent_0_belief_state,                               # belief update
             state.agent_0s_estimate_of_agent_1s_belief_state,        # estimate of other's belief post-utterance
         )
         agent_1_actions = (
             jnp.zeros(5),
+            key,                                                      # utterance rendering rng key
             state.agent_1_belief_state,
             state.agent_1s_estimate_of_agent_0s_belief_state,
         )

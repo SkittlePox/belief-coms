@@ -30,7 +30,7 @@ class DecPOMDPModel:
         other_belief,
         belief_state_factory,
         ego_agent_id=0,
-        evaluation_depth=4,
+        evaluation_depth=2,
         discount_factor=0.9,
     ):
         """Evaluate the ego agent's expected discounted return from a given state.
