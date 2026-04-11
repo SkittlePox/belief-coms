@@ -203,7 +203,9 @@ if __name__ == "__main__":
     print("\n--- Observation function (joint sample per state) ---")
     factory = JointCategoricalPair(vars_num_categories=(N, N))
     for s in range(N):
-        sample = factory.sample_joint_distribution(key, env._joint_observation_function(s, 0))
+        sample = factory.sample_joint_distribution(
+            key, env._joint_observation_function(s, 0)
+        )
         print(f"  State {s}: {sample}")
 
     ### Belief update test

@@ -31,16 +31,16 @@ class BeliefActor(nn.Module):
     (after shifting to be positive), so samples are belief states on the simplex.
 
     Args:
-        input_shape: Spatial dimensions of the utterance image, e.g. `(8, 8)`.
+        input_utterance_shape: Spatial dimensions of the utterance image, e.g. `(8, 8)`.
         belief_dim: Number of categories in the belief state simplex.
     """
 
-    input_shape: Sequence[int]
+    input_utterance_shape: Sequence[int]
     belief_dim: int
 
     @nn.compact
     def __call__(self, previous_belief, utterance):
-        x = utterance.reshape((-1, *self.input_shape, 1))
+        x = utterance.reshape((-1, *self.input_utterance_shape, 1))
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
         x = nn.relu(x)
         x = nn.Conv(features=64, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
@@ -65,12 +65,12 @@ class BeliefActor(nn.Module):
 
 
 class BeliefCritic(nn.Module):
-    input_shape: Sequence[int]
+    input_utterance_shape: Sequence[int]
     belief_dim: int
 
     @nn.compact
     def __call__(self, previous_belief, utterance):
-        x = utterance.reshape((-1, *self.input_shape, 1))
+        x = utterance.reshape((-1, *self.input_utterance_shape, 1))
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
         x = nn.relu(x)
         x = nn.Conv(features=64, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
@@ -91,7 +91,7 @@ class ActorCriticBeliefAgent(nn.Module):
     """
     An actor-critic agent that operates over belief states rather than actions.
 
-    Given an utterance (an image of shape `input_shape`) and a previous belief
+    Given an utterance (an image of shape `input_utterance_shape`) and a previous belief
     state (a distribution over `belief_dim` categories), the agent produces:
       - A Dirichlet distribution over the simplex, representing a distribution
         over possible next belief states. Sampling from this yields a categorical
@@ -103,21 +103,21 @@ class ActorCriticBeliefAgent(nn.Module):
     belief, and passes through independent dense layers.
 
     Args:
-        input_shape: Spatial dimensions of the utterance image, e.g. `(8, 8)`.
+        input_utterance_shape: Spatial dimensions of the utterance image, e.g. `(8, 8)`.
         belief_dim: Number of categories in the belief state simplex.
     """
 
-    input_shape: Sequence[int]
+    input_utterance_shape: Sequence[int]
     belief_dim: int
 
     @nn.compact
     def __call__(self, previous_belief, utterance):
-        pi = BeliefActor(input_shape=self.input_shape, belief_dim=self.belief_dim)(
-            previous_belief, utterance
-        )
-        value = BeliefCritic(input_shape=self.input_shape, belief_dim=self.belief_dim)(
-            previous_belief, utterance
-        )
+        pi = BeliefActor(
+            input_utterance_shape=self.input_utterance_shape, belief_dim=self.belief_dim
+        )(previous_belief, utterance)
+        value = BeliefCritic(
+            input_utterance_shape=self.input_utterance_shape, belief_dim=self.belief_dim
+        )(previous_belief, utterance)
         return pi, value
 
 
@@ -128,7 +128,9 @@ if __name__ == "__main__":
     belief_dim = 16
     batch_size = 4
 
-    agent = ActorCriticBeliefAgent(input_shape=input_shape, belief_dim=belief_dim)
+    agent = ActorCriticBeliefAgent(
+        input_utterance_shape=input_shape, belief_dim=belief_dim
+    )
     key = jax.random.PRNGKey(0)
 
     utterance = jax.random.uniform(key, shape=(batch_size, *input_shape))
