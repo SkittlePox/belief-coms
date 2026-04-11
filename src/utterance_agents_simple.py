@@ -10,11 +10,11 @@ class UtteranceActor(nn.Module):
     conditioned on a target belief vector.
 
     Args:
-        utterance_dim: Dimensionality of the flat utterance vector.
+        utterance_action_dim: Dimensionality of the flat utterance vector.
         belief_dim:    Number of categories in the belief state.
     """
 
-    utterance_dim: int
+    utterance_action_dim: int
     belief_dim: int
 
     @nn.compact
@@ -26,10 +26,10 @@ class UtteranceActor(nn.Module):
         x = nn.Dense(128)(x)
         x = nn.relu(x)
 
-        mean = nn.Dense(self.utterance_dim)(x)
+        mean = nn.Dense(self.utterance_action_dim)(x)
         mean = nn.sigmoid(mean)
 
-        scale_diag = nn.Dense(self.utterance_dim)(x)
+        scale_diag = nn.Dense(self.utterance_action_dim)(x)
         scale_diag = nn.softplus(scale_diag) + 1e-8
 
         return distrax.MultivariateNormalDiag(loc=mean, scale_diag=scale_diag)
@@ -65,29 +65,29 @@ class ActorCriticUtteranceAgent(nn.Module):
     and a scalar value estimate (critic) with entirely separate parameters.
 
     Args:
-        utterance_dim: Dimensionality of the flat utterance vector.
+        utterance_action_dim: Dimensionality of the flat utterance vector.
         belief_dim:    Number of categories in the belief state.
     """
 
-    utterance_dim: int
+    utterance_action_dim: int
     belief_dim: int
 
     @nn.compact
     def __call__(self, target_belief):
         pi = UtteranceActor(
-            utterance_dim=self.utterance_dim, belief_dim=self.belief_dim
+            utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim
         )(target_belief)
         value = UtteranceCritic(belief_dim=self.belief_dim)(target_belief)
         return pi, value
 
 
 if __name__ == "__main__":
-    utterance_dim = 16
+    utterance_action_dim = 16
     belief_dim = 5
     batch_size = 4
 
     agent = ActorCriticUtteranceAgent(
-        utterance_dim=utterance_dim, belief_dim=belief_dim
+        utterance_action_dim=utterance_action_dim, belief_dim=belief_dim
     )
     key = jax.random.PRNGKey(0)
 
