@@ -4,9 +4,9 @@ import distrax
 from flax import struct
 from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from functools import partial
-from belief_representations import *
-from distributions import *
-from model import *
+from tools.belief_representations import *
+from tools.distributions import *
+from tools.model import *
 
 
 @struct.dataclass

@@ -13,10 +13,10 @@ class BeliefActor(nn.Module):
     previous belief, and outputs log-likelihoods log L(utterance | state) for
     each state. The updated belief concentrations are then computed as:
 
-        Option 1 — Bayesian update (probability space):
+        Actual Bayesian update:
             b'(s) ∝ b(s) * L(utterance | s)
 
-        Option 2 — Log-space Bayesian update (implemented here):
+        As implemented (functionally the same) — Log-space Bayesian update:
             log b'(s) = log b(s) + log L(utterance | s)
             b' = softmax(log b + log L)
 
