@@ -10,13 +10,13 @@ class CategoricalBeliefState:
     """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution.
 
     """
-    def __init__(self, num_unique_states, num_unique_observations, num_unique_actions, joint_transition_function, joint_observation_function, joint_action_constructor):
+    def __init__(self, num_unique_states, num_unique_observations_per_agent, num_unique_actions, joint_transition_function, joint_observation_function, joint_action_constructor):
         self.num_unique_states = num_unique_states
-        self.num_unique_observations = num_unique_observations
+        self.num_unique_observations_per_agent = num_unique_observations_per_agent
         self.num_unique_actions = num_unique_actions
         self.joint_transition_function = joint_transition_function
         self.joint_observation_function = joint_observation_function
-        self.joint_factory = JointCategoricalPair((num_unique_observations, num_unique_observations))
+        self.joint_factory = JointCategoricalPair(num_unique_observations_per_agent)
         self.joint_action_constructor = joint_action_constructor
 
     def update_with_observation_and_joint_action(
@@ -149,7 +149,7 @@ class CategoricalBeliefState:
         ego_observation,
         previous_ego_action,
         other_optimal_policy,
-        agent_id = 0
+        agent_id = 0    # This is the ego agent's id!
     ):
         """Update the ego agent's estimate of the other agent's belief state.
 
@@ -216,7 +216,7 @@ class CategoricalBeliefState:
 
                 return jnp.sum(jax.vmap(per_state)(jnp.arange(self.num_unique_states)))
 
-            all_obs = jnp.arange(self.num_unique_observations)
+            all_obs = jnp.arange(self.num_unique_observations[agent_id])
             weights = jax.vmap(weight_of_obs)(all_obs)          # (O,)
             all_probs = jax.vmap(updated_bj_under_obs)(all_obs) # (O, S)
 

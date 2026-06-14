@@ -2,7 +2,7 @@ import jax, chex
 import jax.numpy as jnp
 from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from flax import struct
-from typing import Any
+from typing import Any, Callable
 from functools import partial
 
 @struct.dataclass
@@ -30,28 +30,35 @@ class StackedState:
 
     iteration: int
 
-# class StackedSignificationPOMDP(MultiAgentEnv):
-#     """
-#     This class has multiple agents that are passed to a series of SignificationPOMDPs
-#     """
+class StackedSignificationPOMDP(MultiAgentEnv):
+    """
+    This class has multiple agents that are passed to a series of SignificationPOMDPs
 
-#     def __init__(self, num_agents: int, underlying_sigpomdp) -> None:
-#         super().__init__(num_agents)
+    This class assigns agents to games according to a scheduler
+    """
 
-#         self.underlying_sigpomdp = underlying_sigpomdp
+    def __init__(self, num_agents: int, env_maplist: Callable, env_schedule_function: Callable, ) -> None:
+        """
+        Args:
+            num_agents
+            env_schedule_function
+        """
+        super().__init__(num_agents)
 
-
-#     @partial(jax.jit, static_argnums=(0,))
-#     def reset(self, key: chex.PRNGKey):
-
-#         # Assign senders and receivers to channels
-#         k1, key = jax.random.split(key)
-#         shuffled_agents = jax.random.permutation(k1, self.num_agents)
-#         channel_map = shuffled_agents.reshape((self.num_agents/2, 2))
+        # self.underlying_sigpomdp = underlying_sigpomdp
 
 
-#         initial_environment_state = StackedState(
-#             augmented_pomdp_states=
-#         )
-#         return initial_environment_state, self.get_obs(key, initial_environment_state)
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, key: chex.PRNGKey):
+
+        # Assign senders and receivers to channels
+        k1, key = jax.random.split(key)
+        shuffled_agents = jax.random.permutation(k1, self.num_agents)
+        channel_map = shuffled_agents.reshape((self.num_agents/2, 2))
+
+
+        initial_environment_state = StackedState(
+            augmented_pomdp_states=
+        )
+        return initial_environment_state, self.get_obs(key, initial_environment_state)
 

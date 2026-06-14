@@ -10,8 +10,10 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/src",
             "env": {
-                "JAX_DISABLE_JIT": "1"
+                "JAX_DISABLE_JIT": "1",
+                "PYTHONPATH": "${workspaceFolder}/src"
             }
         }
     ]
