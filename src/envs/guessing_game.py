@@ -29,8 +29,12 @@ class GuessingGame(MultiAgentEnv):
 
     def __init__(self) -> None:
         super().__init__(num_agents=2)
-        self.initial_belief_agent_0 = distrax.Categorical(probs=jnp.ones(4).at[3].set(0.0))
-        self.initial_belief_agent_1 = distrax.Categorical(probs=jnp.ones(4).at[3].set(0.0))
+        self.initial_belief_agent_0 = distrax.Categorical(
+            probs=jnp.ones(4).at[3].set(0.0)
+        )
+        self.initial_belief_agent_1 = distrax.Categorical(
+            probs=jnp.ones(4).at[3].set(0.0)
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: GuessingGameState):
@@ -84,9 +88,10 @@ class GuessingGame(MultiAgentEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def _joint_transition_function(self, state_num, joint_action):
-        """There are 4 possible states. States 0-2 corresponding to optimal actions 0-2 and State 3 is the done state"""
+        """
+        There are 4 possible states. States 0-2 corresponding to optimal actions 0-2 and State 3 is the done state
+        """
         # If you are in states 0-2, depending on the receiver action you will either stay in the same state or transition to the final state (4)
-        # This function should be represented as T(s'|s, a)
 
         probs = jax.lax.cond(
             joint_action[0] == state_num,
@@ -94,8 +99,6 @@ class GuessingGame(MultiAgentEnv):
             lambda _: jnp.zeros(4).at[state_num].set(1.0),
             None,
         )
-
-        # probs = jnp.zeros(3).at[state_num].set(1.0)
 
         return distrax.Categorical(probs=probs)
 
@@ -105,38 +108,11 @@ class GuessingGame(MultiAgentEnv):
         There are only 3 environment observations: A, B, C corresponding to 0, 1, 2
         Only agent 1 sees them.
         """
-        # This function should be represented as O(o1, o2|s), a 2D categorical distribution, dim 3
-        #                       Agent 0
-        #                  A       B       C
-        #              +-------+-------+-------+
-        #            A | (0,0) | (0,1) | (0,2) |
-        #              +-------+-------+-------+
-        #  Agent 1   B | (1,0) | (1,1) | (1,2) |
-        #              +-------+-------+-------+
-        #            C | (2,0) | (2,1) | (2,2) |
-        #              +-------+-------+-------+
-        #                 (agent 0, agent 1)
-
-        # This should be a 1 by 3 grid actually
-        # Agent 0 sees nothing but Agent 1 sees the hidden variable
 
         probs = jnp.array([[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]])[
             state_num
         ]
 
-        # def state_0():
-        #     return jnp.array([0.0, 0.5, 0.5])
-
-        # def state_0():
-        #     return jnp.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.5, 0.0])
-
-        # def state_1():
-        #     return jnp.array([0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0])
-
-        # def state_2():
-        #     return jnp.array([0.0, 0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
-
-        # probs = jax.lax.switch(state_num, [state_0, state_1, state_2])  # These are the only states that matter I think...
         return distrax.Categorical(probs=probs)
 
     def _joint_action_constructor(self, agent_id, ego_action, other_action):
@@ -166,33 +142,21 @@ class GuessingGame(MultiAgentEnv):
         # return (joint_action[0] == state, joint_action[0] == state)
 
     def _agent_0_optimal_policy(self, belief_distribution: distrax.Categorical):
-        """Returns a probability distribution over possible actions in the DecPOMDP.
-        belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
+        """
+        Returns a probability distribution over possible actions in the DecPOMDP.
+        belief_distribution is a categorical distrax distribution over all possible states.
         """
         return belief_distribution
 
     def _agent_1_optimal_policy(self, belief_distribution: distrax.Categorical):
-        """Returns a probability distribution over possible actions in the DecPOMDP.
-        belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
+        """
+        Returns a probability distribution over possible actions in the DecPOMDP.
+        belief_distribution is a categorical distrax distribution over all possible states.
         """
         return distrax.Categorical(probs=[1.0])
 
     def _is_terminal_state(self, state):
         return state == 4
-
-    # def _optimal_policy(self, belief_distribution: distrax.Categorical):
-    #     """ Returns a probability distribution over possible actions in the DecPOMDP.
-    #     belief_distribution is a categorical distrax distribution over all possible states. (Assuming 3 for simplicity)
-    #     """
-    #     # The optimal action distribution is the same as the belief distribution...
-    #     return belief_distribution
-
-    # def _agent_1_optimal_policy(self, belief_distribution: distrax.Categorical):
-    #     """
-    #         Returns a probability distribution over possible actions in the DecPOMDP.
-    #     """
-    #     # The optimal action distribution is the same as the belief distribution...
-    #     return distrax.Categorical(probs=jnp.array([1]))
 
 
 if __name__ == "__main__":
@@ -272,7 +236,7 @@ if __name__ == "__main__":
         belief_distribution=initial_belief,
         observation=0,
         previous_joint_action=(2, 0),
-        agent_id=1
+        agent_id=1,
     )
     print(new_belief.probs)
 
@@ -286,7 +250,7 @@ if __name__ == "__main__":
         ego_observation=0,
         previous_ego_action=3,
         other_optimal_policy=env._optimal_policy,
-        agent_id=0
+        agent_id=0,
     )  # Prob for index 0 should be highest actually, because they cannot see 0
     print(their_beliefs.probs)
 
