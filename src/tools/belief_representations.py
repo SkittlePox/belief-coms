@@ -222,8 +222,10 @@ class CategoricalBeliefState:
 
             def updated_bj_under_obs(other_obs):
                 """Run agent j's full belief update under this hypothetical o_other."""
+                # 1 - agent_id (not int(not ...)) so agent_id may be a traced array,
+                # letting callers vmap these updates over per-agent roles.
                 updated_bj_probs = self.update_with_observation_and_joint_action(
-                    other_belief_distribution_estimate, other_obs, joint_action, agent_id=int(not agent_id)
+                    other_belief_distribution_estimate, other_obs, joint_action, agent_id=1 - agent_id
                 ).probs
                 return updated_bj_probs
 

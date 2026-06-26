@@ -4,7 +4,7 @@ A single game type is described by an :class:`EnvSpec` — a builder returning o
 (unstacked) :class:`FlexibleEnvParams` together with its per-role optimal
 policies (e.g. ``envs.guessing_game.guessing_game_spec``).
 :func:`assemble_environments` turns a list of specs (one per game type) into the
-two things ``StackedSignificationPOMDP`` consumes:
+two things ``StackedSignificationDecPOMDP`` consumes:
 
   * one ``FlexibleEnvParams`` whose array fields are padded to common
     ``(S, A, O)`` maxima and stacked along a leading game-type axis, and

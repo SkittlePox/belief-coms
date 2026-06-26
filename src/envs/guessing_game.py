@@ -4,6 +4,24 @@ This module holds the guessing game's *definition* — the eager tensor builders
 the per-role optimal policies, and ``guessing_game_spec`` (an EnvSpec). The
 generic runtime lives in envs/flexible_env.py (FlexibleEnv); assembly across
 game types lives in envs/factory.py.
+
+Q&A
+---
+Q: Is state 3 (the 4th state) a termination state?
+A: Yes. It's absorbing, gives 0 reward, has uninformative (uniform) observations,
+   and is never an initial state. States 0-2 are the referents; you reach state 3
+   only by pressing the matching button (a0 == s).
+
+Q: Is the observation function deterministic?
+A: No, stochastic. In state s each agent sees one of the two symbols != s, 50/50,
+   drawn independently per agent and per step (action-independent).
+
+Q: Can the button-presser learn the true state just by waiting?
+A: Yes. Each observed symbol k rules out state k, so after seeing both non-true
+   symbols the belief collapses to the true state. P(identified after n waits) =
+   1 - 0.5^(n-1) (~3 waits on average), at a cost of -0.1 per wait. So the presser
+   can solo-solve the game; communication only speeds it up, it isn't necessary.
+   Note: this is not a k-POMDP and there is no static randomness in this environment.
 """
 
 import jax
@@ -147,15 +165,29 @@ if __name__ == "__main__":
                 break
         print(f"episode return: {episode_return:.2f}")
 
-    ### Belief update test (belief engine reads the FlexibleEnvParams directly) ###
+    ### Demonstration: the presser learns the true state just by waiting ###
+    # Observations are stochastic but state-distinctive (state s never emits symbol
+    # s), so each observed symbol rules out one state. Once the presser has seen
+    # both non-true symbols, its belief collapses to certainty -- no communication
+    # needed. Here the presser repeatedly waits, observes, and updates its belief.
     belief_factory = CategoricalBeliefState(params)
-    initial_belief = distrax.Categorical(probs=params.initial_belief_states[1])
-    print("\ninitial belief:", initial_belief.probs)
+    true_state = 0
+    wait = env.num_actions - 1                       # the "wait" action
+    wait_joint_action = (wait, wait)                 # presser waits; other agent inert
+    presser_obs_dist = params.observation[true_state, 0, 0].sum(axis=1)  # O(o | true_state)
 
-    new_belief = belief_factory.update_with_observation_and_joint_action(
-        belief_distribution=initial_belief,
-        observation=0,
-        previous_joint_action=(2, 0),
-        agent_id=1,
-    )
-    print("updated belief:", new_belief.probs)
+    print(f"\n=== Learning by waiting (presser, true state = {true_state}) ===")
+    belief = distrax.Categorical(probs=params.initial_belief_states[0])
+    print(f"  start : belief = {belief.probs}")
+    key = jax.random.key(0)
+    for t in range(12):
+        key, obs_key = jax.random.split(key)
+        observation = distrax.Categorical(probs=presser_obs_dist).sample(seed=obs_key)
+        belief = belief_factory.update_with_observation_and_joint_action(
+            belief, observation, wait_joint_action, agent_id=0
+        )
+        identified = bool(belief.probs[true_state] > 0.999)
+        note = "  <- identified the true state!" if identified else ""
+        print(f"  t={t:<2}: saw symbol {int(observation)} -> belief = {belief.probs}{note}")
+        if identified:
+            break

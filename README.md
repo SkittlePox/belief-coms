@@ -25,3 +25,27 @@ I think I'm getting stuck on this for now. I think the structure of the individu
 I decided that the structure of the environments will largely be the same, so I'll use one large belief state representation I think. The transition and reward function will change from game to game, I wonder if that will be a problem.
 
 Hmm okay this is very interesting. If everything is a guessing game it makes the code way easier to write because the transition function can actually be identical and parameterized by vectors in the state. This would actually be quite wise. So I should transition to code that just handles guessing games of various kinds, and keeps the relevant transition and reward dynamics info stored in a vector somewhere. I think that should be possible for a narrow set of guessing games. Time to sketch the games out...
+
+# Running
+
+The project is **not installed as a package**. The code uses fully-qualified
+imports (`envs.*`, `tools.*`) rooted at `src/`, so run modules from inside `src/`
+with `src/` on the path:
+
+```bash
+cd src
+PYTHONPATH=. uv run python -m tools.returns
+```
+
+Use the dotted module path (`-m tools.returns`), not a file path. Running a file
+directly (e.g. `uv run tools/returns.py`) only puts that file's folder on
+`sys.path`, not `src/`, so imports like `import envs` fail with
+`ModuleNotFoundError`. `PYTHONPATH=.` adds `src/` (the cwd) to the path.
+
+Other entry points follow the same pattern, e.g.:
+
+```bash
+PYTHONPATH=. uv run python -m envs.guessing_game
+PYTHONPATH=. uv run python -m envs.factory
+PYTHONPATH=. uv run python -m stacked_signification_pomdp
+```
