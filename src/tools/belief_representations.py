@@ -10,19 +10,49 @@ class CategoricalBeliefState:
     """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution.
 
     """
-    def __init__(self, num_unique_states, num_unique_observations, num_unique_actions, joint_transition_function, joint_observation_function, joint_action_constructor):
-        self.num_unique_states = num_unique_states
-        # A single observation alphabet shared by all agents: every agent draws
-        # from the same set of `num_unique_observations` possible observations.
-        self.num_unique_observations = num_unique_observations
-        self.num_unique_actions = num_unique_actions
-        self.joint_transition_function = joint_transition_function
-        self.joint_observation_function = joint_observation_function
+    def __init__(self, env_params):
+        """Build a belief-update engine for a single DecPOMDP.
+
+        Args:
+            env_params: A FlexibleEnvParams (or any object exposing ``transition``
+                [S, A, A, S], ``observation`` [S, A, A, O, O], ``num_states`` and
+                ``num_actions``). The dense dynamics tensors are read directly via
+                gathers, replacing the per-env callables this class used to take.
+                Must be concrete (not a tracer) so the cardinalities are static.
+
+        Note: pass a SINGLE game's params here, not the stacked (leading
+        game-type axis) FlexibleEnvParams produced by ``assemble_environments``.
+        """
+        self.env_params = env_params
+        self.num_unique_states = int(env_params.num_states)
+        self.num_unique_actions = int(env_params.num_actions)
+        # A single observation alphabet shared by all agents, read off the
+        # observation tensor's trailing axis.
+        self.num_unique_observations = env_params.observation.shape[-1]
         # The joint observation model O(o0, o1 | s', a) is still correlated, but
-        # both agents now use the same cardinality, so the two per-agent marginals
+        # both agents use the same cardinality, so the two per-agent marginals
         # are the same size (this is what removes the earlier lax.cond mismatch).
-        self.joint_factory = JointCategoricalPair((num_unique_observations, num_unique_observations))
-        self.joint_action_constructor = joint_action_constructor
+        self.joint_factory = JointCategoricalPair((self.num_unique_observations, self.num_unique_observations))
+
+    def joint_transition_function(self, state, joint_action) -> distrax.Categorical:
+        """T(s' | s, a0, a1) as a gather into env_params.transition -> [S']."""
+        agent_0_action, agent_1_action = joint_action
+        return distrax.Categorical(probs=self.env_params.transition[state, agent_0_action, agent_1_action])
+
+    def joint_observation_function(self, next_state, joint_action) -> distrax.Categorical:
+        """O(o0, o1 | s', a0, a1) flattened to [O * O] (JointCategoricalPair order)."""
+        agent_0_action, agent_1_action = joint_action
+        probs = self.env_params.observation[next_state, agent_0_action, agent_1_action].reshape(-1)
+        return distrax.Categorical(probs=probs)
+
+    def joint_action_constructor(self, agent_id, ego_action, other_action):
+        """Order (ego, other) actions into the (agent_0, agent_1) joint action."""
+        return jax.lax.cond(
+            agent_id == 0,
+            lambda _: (ego_action, other_action),
+            lambda _: (other_action, ego_action),
+            None,
+        )
 
     def update_with_observation_and_joint_action(
         self, 
