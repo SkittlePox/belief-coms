@@ -21,3 +21,7 @@ So each DecPOMDP should also have a belief state. Rigid roles and initial belief
 So I'm slightly worried about the double-bookkeeping of the environments. There's a major difference between representing them in a class vs as probability distributions... I do actually think I need both... And I don't really think this is a major problem for now...
 
 I think I'm getting stuck on this for now. I think the structure of the individual environments is actually pretty clear. It's time to build the manager environment.
+
+I decided that the structure of the environments will largely be the same, so I'll use one large belief state representation I think. The transition and reward function will change from game to game, I wonder if that will be a problem.
+
+Hmm okay this is very interesting. If everything is a guessing game it makes the code way easier to write because the transition function can actually be identical and parameterized by vectors in the state. This would actually be quite wise. So I should transition to code that just handles guessing games of various kinds, and keeps the relevant transition and reward dynamics info stored in a vector somewhere. I think that should be possible for a narrow set of guessing games. Time to sketch the games out...

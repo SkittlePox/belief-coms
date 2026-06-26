@@ -3,8 +3,8 @@ import jax, chex
 import copy
 import distrax
 import jax.numpy as jnp
+import numpy as np
 from flax import struct
-from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from functools import partial
 from tools.belief_representations import CategoricalBeliefState
 from tools.distributions import JointCategoricalPair
@@ -13,22 +13,141 @@ from tools.model import DecPOMDPModel
 
 @struct.dataclass
 class GuessingGameState:
-    hidden_variable: (
-        chex.Array
-    )  # This is an integer corresponding to the variable the 'sender' sees
-    optimal_button_action: (
-        chex.Array
-    )  # This is an integer corresponding to the optimal button action
+    state_index: chex.Array   # The DecPOMDP state: 0..2 = optimal button action, done_state = terminal
     done: chex.Array
 
 
-class GuessingGame(MultiAgentEnv):
-    """
-    This is a stripped-down environment for testing purposes
+@struct.dataclass
+class EnvParams:
+    """Dense dynamics tensors for a (variant of a) DecPOMDP.
+
+    Everything that distinguishes one environment variant from another lives
+    here as plain arrays, so different variants are just different EnvParams
+    instances *with identical shapes* — which is what keeps a future
+    vmap-over-environments clean (no per-env Python branching / lax.switch).
+
+    The conditioning below is the most general the current consumers
+    (tools/model.py, tools/belief_representations.py) can actually feed, given
+    what each call site has in scope:
+
+        transition   T(s' | s, a0, a1)         shape [S, A, A, S]
+        observation  O(o0, o1 | s', a0, a1)    shape [S, A, A, O0, O1]
+        reward       R_i(s, a0, a1, s')        shape [N, S, A, A, S]
+
+    Notes on the deliberate choices:
+      * Observation conditions on the *next* state s' (its first axis) and on
+        the joint action — never on the previous state.
+      * Both agents get their own action axis (a0, a1) even when one agent's
+        action is currently inert, so the shapes stay uniform across variants.
+      * Reward carries a leading agent axis (N) so per-agent (non-shared)
+        reward structures are expressible later.
     """
 
-    def __init__(self) -> None:
-        super().__init__(num_agents=2)
+    transition: chex.Array
+    observation: chex.Array
+    reward: chex.Array
+
+
+def build_transition_tensor(num_states, num_actions, done_state):
+    """T(s' | s, a0, a1), shape [S, A, A, S].
+
+    Guessing game: pressing the button matching the state (a0 == s) sends you to
+    the absorbing done state; any other action keeps you put. Agent 1's action
+    is inert. The done state is absorbing.
+    """
+    T = np.zeros((num_states, num_actions, num_actions, num_states))
+    for s in range(num_states):
+        for a0 in range(num_actions):
+            for a1 in range(num_actions):
+                if s == done_state:
+                    next_state = done_state          # absorbing
+                elif a0 == s:
+                    next_state = done_state          # correct button -> done
+                else:
+                    next_state = s                   # stay
+                T[s, a0, a1, next_state] = 1.0
+    return jnp.asarray(T)
+
+
+def build_observation_tensor(num_states, num_actions, num_observations, done_state):
+    """O(o0, o1 | s', a0, a1), shape [S, A, A, O, O].
+
+    Single shared observation alphabet: both agents draw from the same set of
+    `num_observations` symbols. Each agent independently sees, uniformly, one of
+    the two symbols that are NOT the true state, so the joint is the outer product
+    of the two identical per-agent marginals. Action-independent here, so we
+    broadcast over the action axes. In the done state both marginals are uniform.
+    """
+    O = np.zeros((num_states, num_actions, num_actions, num_observations, num_observations))
+    base = np.array(
+        [
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [0.5, 0.5, 0.0],
+        ]
+    )
+    for s in range(num_states):
+        row = np.ones(num_observations) / num_observations if s == done_state else base[s]
+        O[s, :, :, :, :] = np.outer(row, row)   # independent identical marginals
+    return jnp.asarray(O)
+
+
+def build_reward_tensor(num_states, num_actions, num_agents, done_state):
+    """R_i(s, a0, a1, s'), shape [N, S, A, A, S].
+
+    Guessing game: shared reward across agents. +1 for the button matching the
+    state, -1 for a wrong button, -0.1 for the wait action; 0 in the done state.
+    Independent of agent 1's action and of s' here.
+    """
+    R = np.zeros((num_agents, num_states, num_actions, num_actions, num_states))
+    for s in range(num_states):
+        reward_array = np.array([-1.0, -1.0, -1.0, -0.1])
+        if s < num_actions:
+            reward_array[s] = 1.0
+        for a0 in range(num_actions):
+            value = 0.0 if s == done_state else reward_array[a0]
+            R[:, s, a0, :, :] = value        # all agents, all a1, all s'
+    return jnp.asarray(R)
+
+
+class GuessingGame:
+    """
+    This is a stripped-down environment for testing purposes.
+
+    Deliberately a plain class — it does not implement the JaxMARL
+    MultiAgentEnv interface (dict-keyed, agent-named observations/actions and
+    the auto-resetting `step`). reset/step_env/get_obs use simple positional
+    (agent_0, agent_1) tuples, and dynamics are read from `self.params`.
+    """
+
+    def __init__(
+        self,
+        num_states=4,
+        num_actions=4,
+        num_observations=3,
+        num_agents=2,
+        done_state=3,
+    ) -> None:
+        self.num_agents = num_agents
+        self.num_states = num_states
+        self.num_actions = num_actions
+        # A single observation alphabet shared by all agents.
+        self.num_observations = num_observations
+        self.done_state = done_state
+
+        # Dense dynamics tensors. Built eagerly (plain numpy loops) so the
+        # high-rank tensors stay readable; consumed at runtime as simple gathers.
+        self.params = EnvParams(
+            transition=build_transition_tensor(num_states, num_actions, done_state),
+            observation=build_observation_tensor(
+                num_states,
+                num_actions,
+                num_observations,
+                done_state,
+            ),
+            reward=build_reward_tensor(num_states, num_actions, num_agents, done_state),
+        )
+
         self.initial_belief_agent_0 = distrax.Categorical(
             probs=jnp.ones(4).at[3].set(0.0)
         )
@@ -38,81 +157,83 @@ class GuessingGame(MultiAgentEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: GuessingGameState):
-        # There are only three possible discrete observations
-        return jnp.array(-1), state.hidden_variable
+        """Both agents' observations are sampled jointly from O(o0, o1 | s', a).
+
+        The joint is flattened row-major (index = o0 * O + o1), so we decode
+        o0 = flat // O and o1 = flat % O. Observation is action-independent in
+        this env, so we query O with a no-op action.
+        """
+        joint_obs_dist = self._joint_observation_function(state.state_index, (0, 0))
+        flat_obs = joint_obs_dist.sample(seed=key)
+        agent_0_obs = flat_obs // self.num_observations
+        agent_1_obs = flat_obs % self.num_observations
+        return agent_0_obs, agent_1_obs
 
     def step_env(
         self, key: chex.PRNGKey, state: GuessingGameState, joint_action: chex.Array
     ):
         """
-        Actions are sent in the order (agent_0, agent_1) and are shape (1) and (1)
-        Agent 0 is always the button presser. Agent 1 does not have any actions, or rather its actions are unused.
-        Assuming 3 buttons, and a wait action, so 4 actions
+        Actions are sent in the order (agent_0, agent_1). Agent 0 is the button
+        presser; agent 1's action is currently inert. The transition and reward
+        are sampled/read from the _joint_* dynamics API (the single reader of
+        self.params), so rollouts and the DecPOMDP model never diverge.
         """
-        agent_0_action, _agent_1_action = joint_action
+        transition_key, obs_key = jax.random.split(key)
+        s = state.state_index
 
-        reward_array = (
-            jnp.array([-1.0, -1.0, -1.0, -0.1]).at[state.optimal_button_action].set(1.0)
+        next_index = self._joint_transition_function(s, joint_action).sample(
+            seed=transition_key
         )
-        agent_reward = reward_array[agent_0_action]
-
-        is_done = agent_0_action == state.optimal_button_action
+        agent_rewards = self._joint_reward_function(s, joint_action, next_index)
 
         next_environment_state = GuessingGameState(
-            hidden_variable=state.hidden_variable,
-            optimal_button_action=state.optimal_button_action,
-            done=jnp.array(is_done),
+            state_index=next_index,
+            done=jnp.array(next_index == self.done_state),
         )
 
         return (
             next_environment_state,
-            self.get_obs(key, next_environment_state),
-            (agent_reward, agent_reward),
+            self.get_obs(obs_key, next_environment_state),
+            agent_rewards,
             next_environment_state.done,
         )
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key: chex.PRNGKey):
         """
-        Agent 0 is always the button presser. Agent 1 always sees the hidden variable.
+        Agent 0 is always the button presser. The state index (= optimal button
+        action) is drawn uniformly from the non-terminal states.
         """
-
-        optimal_button_key, key = jax.random.split(key)
-        perm = jax.random.permutation(optimal_button_key, jnp.arange(3))
+        state_key, obs_key = jax.random.split(key)
+        state_index = jax.random.randint(state_key, (), 0, self.done_state)
 
         initial_environment_state = GuessingGameState(
-            hidden_variable=perm[0], optimal_button_action=perm[1], done=jnp.array(0)
+            state_index=state_index, done=jnp.array(0)
         )
 
-        return (initial_environment_state, self.get_obs(key, initial_environment_state))
+        return (
+            initial_environment_state,
+            self.get_obs(obs_key, initial_environment_state),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def _joint_transition_function(self, state_num, joint_action):
-        """
-        There are 4 possible states. States 0-2 corresponding to optimal actions 0-2 and State 3 is the done state
-        """
-        # If you are in states 0-2, depending on the receiver action you will either stay in the same state or transition to the final state (4)
-
-        probs = jax.lax.cond(
-            joint_action[0] == state_num,
-            lambda _: jnp.array([0.0, 0.0, 0.0, 1.0]),
-            lambda _: jnp.zeros(4).at[state_num].set(1.0),
-            None,
-        )
-
+        """T(s' | s, a0, a1) as a gather into params.transition -> [S']."""
+        agent_0_action, agent_1_action = joint_action
+        probs = self.params.transition[state_num, agent_0_action, agent_1_action]
         return distrax.Categorical(probs=probs)
 
     @partial(jax.jit, static_argnums=(0,))
-    def _joint_observation_function(self, state_num, joint_action):
-        """
-        There are only 3 environment observations: A, B, C corresponding to 0, 1, 2
-        Only agent 1 sees them.
-        """
+    def _joint_observation_function(self, next_state, joint_action):
+        """O(o0, o1 | s', a0, a1) as a gather into params.observation.
 
-        probs = jnp.array([[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]])[
-            state_num
-        ]
-
+        Returns the joint distribution flattened to [O * O], matching what
+        JointCategoricalPair(vars_num_categories=(O, O)) expects.
+        """
+        agent_0_action, agent_1_action = joint_action
+        probs = self.params.observation[
+            next_state, agent_0_action, agent_1_action
+        ].reshape(-1)
         return distrax.Categorical(probs=probs)
 
     def _joint_action_constructor(self, agent_id, ego_action, other_action):
@@ -127,19 +248,12 @@ class GuessingGame(MultiAgentEnv):
         )
 
     def _joint_reward_function(self, state, joint_action, next_state):
-        """
-        The reward for the done state (state idx 3) is 0
-        """
-        reward_array = jnp.array([-1.0, -1.0, -1.0, -0.1]).at[state].set(1.0)
-        reward = jax.lax.cond(
-            state == 3,
-            lambda _: (0.0, 0.0),
-            lambda _: (reward_array[joint_action[0]], reward_array[joint_action[0]]),
-            None,
-        )
-
-        return reward
-        # return (joint_action[0] == state, joint_action[0] == state)
+        """R_i(s, a0, a1, s') as a gather into params.reward -> per-agent tuple."""
+        agent_0_action, agent_1_action = joint_action
+        rewards = self.params.reward[
+            :, state, agent_0_action, agent_1_action, next_state
+        ]
+        return (rewards[0], rewards[1])
 
     def _agent_0_optimal_policy(self, belief_distribution: distrax.Categorical):
         """
@@ -176,8 +290,8 @@ if __name__ == "__main__":
         env_state, observations = env.reset(reset_key)
         print(f"\n=== Episode {episode} ===")
         print(
-            f"reset state: hidden_variable={env_state.hidden_variable}, "
-            f"optimal_button_action={env_state.optimal_button_action}"
+            f"reset state: state_index={env_state.state_index} "
+            f"(optimal button action)"
         )
         print(f"initial obs (agent_0, agent_1): {observations}")
 
@@ -214,10 +328,10 @@ if __name__ == "__main__":
     print(env._joint_transition_function(0, (0, -1)).probs)
 
     ### Observation function tests
-    factory = JointCategoricalPair(vars_num_categories=(1, 3))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(0, 0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(1, 0)))
-    print(factory.sample_joint_distribution(key, env._joint_observation_function(2, 0)))
+    factory = JointCategoricalPair(vars_num_categories=(3, 3))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(0, (0, 0))))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(1, (0, 0))))
+    print(factory.sample_joint_distribution(key, env._joint_observation_function(2, (0, 0))))
 
     ### Belief update test
     initial_belief = env.initial_belief_agent_1
@@ -225,7 +339,7 @@ if __name__ == "__main__":
 
     belief_factory = CategoricalBeliefState(
         num_unique_states=4,
-        num_unique_observations_per_agent=(1, 3),
+        num_unique_observations=3,
         num_unique_actions=1,
         joint_transition_function=env._joint_transition_function,
         joint_observation_function=env._joint_observation_function,
@@ -249,7 +363,7 @@ if __name__ == "__main__":
         other_belief_distribution_estimate=their_beliefs,
         ego_observation=0,
         previous_ego_action=3,
-        other_optimal_policy=env._optimal_policy,
+        other_optimal_policy=env._agent_1_optimal_policy,
         agent_id=0,
     )  # Prob for index 0 should be highest actually, because they cannot see 0
     print(their_beliefs.probs)
@@ -266,8 +380,8 @@ if __name__ == "__main__":
 
     cum_ret = model.evaluate_expected_returns(
         0,
-        env._optimal_policy,
-        env._optimal_policy,
+        env._agent_0_optimal_policy,
+        env._agent_1_optimal_policy,
         new_belief,
         initial_belief,
         belief_factory,

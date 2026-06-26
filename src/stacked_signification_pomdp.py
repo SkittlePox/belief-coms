@@ -4,109 +4,122 @@ from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 from flax import struct
 from typing import Any
 from functools import partial
+from routing import RouteFn
+from envs.guessing_game import *
 
-from routing import AgentGameRoleRoute, RouteFn
-
-# =============================================================================
-# DESIGN NOTE: representing a variable, time-changing mix of heterogeneous games
-# =============================================================================
-#
-# Scenario: many *kinds* of games run concurrently (e.g. 3 sig1 + 2 sig2 now,
-# 4 sig2 + 1 sig3 later), each type with possibly different pomdp state. The TOTAL
-# number of concurrent games (G) is constant across timesteps.
-#
-# Core constraint: under jit/scan the state pytree structure (which arrays exist,
-# and their shapes) must be STATIC across timesteps. So the mix can't change by
-# adding/removing arrays -- the array set is fixed for all time; only CONTENTS and
-# LIVENESS change. Rules out anything that literally grows/shrinks per type.
-#
-# -----------------------------------------------------------------------------
-# Pattern A -- typed pools + active masks
-# -----------------------------------------------------------------------------
-# One field per game TYPE: that type's state dataclass padded to a fixed CAPACITY,
-# plus a bool `active` mask. Step: vmap each type's OWN step over its OWN pool
-# (homogeneous -> no dispatch, each type keeps its own clean dataclass). Mix change
-# = flip `active` bits + scatter new state into freed slots.
-#
-#   @struct.dataclass
-#   class StackedState:
-#       sig1_states: Sig1State   # leading axis [cap_1]; likewise sig2/sig3
-#       sig1_active: chex.Array  # bool [cap_1]
-#       iteration: int
-#
-# Cost: worst case any type can fill all G slots -> cap_t = G each -> num_types * G
-# slots held AND stepped per timestep, only G ever active (e.g. 10 types, G=5 -> 50
-# vs 5). Tighter per-type bounds shrink this.
-#
-# -----------------------------------------------------------------------------
-# Pattern B -- tagged union + lax.switch
-# -----------------------------------------------------------------------------
-# A single length-G batch whose dataclass is the UNION of all types' fields, plus a
-# game_type[G] tag. Step: vmap over G, inside lax.switch(game_type[i], branch_fns).
-# Exactly G slots of work; mix change is just RETAGGING a slot. Downside: every slot
-# carries all types' fields (wasteful only if states are large and disjoint).
-#
-#   @struct.dataclass
-#   class StackedState:
-#       decpomdp_state: UnionState  # all types' fields, leading axis [G]
-#       game_type: chex.Array       # int [G]
-#       iteration: int
-#
-# lax.switch needs every branch to share inputs + output pytree structure (the
-# UnionState slice), but each game's step wants its own SigKState -- so wrap each
-# step in adapters: from_union (slice -> SigKState) in, to_union (SigKState -> slice)
-# out. to_union re-embeds k's fields and carries other types' fields unchanged.
-#
-#   def make_branch(sigk, from_u, to_u):
-#       return lambda u, key, act: to_u(sigk.step(key, from_u(u), act), u)
-#   branch_fns = [make_branch(games[k], from_union[k], to_union[k]) for k in types]
-#   new_slice  = jax.lax.switch(game_type[i], branch_fns, union_slice, key, actions)
-#
-# -----------------------------------------------------------------------------
-# Decision tree (settle the actual game set first -- it picks the row)
-# -----------------------------------------------------------------------------
-#   States differ a LOT             -> Pattern A; eat the num_types*G over-allocation.
-#   States similar, dynamics differ -> Pattern B (union + lax.switch + adapters).
-#     as CODE                          [currently leaning here]
-#   States similar, dynamics differ -> Neither: one vmapped step over per-game param
-#     only as DATA                       arrays ([G] axis), indexing per slot. Cleanest.
-#
-# Routing knock-on: with either typed pools or a union, a game is addressed by
-# (type, slot). AgentGameRoleRoute.global_to_local_game currently encodes a flat id
-# -- extend it to a (type, slot) pair so routing and StackedState stay consistent.
-# =============================================================================
 
 @struct.dataclass
+class FlexibleEnvParams:
+    """Dense dynamics tensors for a (variant of a) DecPOMDP.
+
+    Everything that distinguishes one environment variant from another lives
+    here as plain arrays, so different variants are just different EnvParams
+    instances *with identical shapes* — which is what keeps a future
+    vmap-over-environments clean (no per-env Python branching / lax.switch).
+
+    The conditioning below is the most general the current consumers
+    (tools/model.py, tools/belief_representations.py) can actually feed, given
+    what each call site has in scope:
+
+        transition   T(s' | s, a0, a1)         shape [S, A, A, S]
+        observation  O(o0, o1 | s', a0, a1)    shape [S, A, A, O0, O1]
+        reward       R_i(s, a0, a1, s')        shape [N, S, A, A, S]
+        num_actions
+        num_states
+        initial_belief_states
+
+    Notes on the deliberate choices:
+      * Observation conditions on the *next* state s' (its first axis) and on
+        the joint action — never on the previous state.
+      * Both agents get their own action axis (a0, a1) even when one agent's
+        action is currently inert, so the shapes stay uniform across variants.
+      * Reward carries a leading agent axis (N) so per-agent (non-shared)
+        reward structures are expressible later.
+    """
+
+    transition: chex.Array
+    observation: chex.Array
+    reward: chex.Array
+    num_actions: chex.Array
+    num_states: chex.Array
+    initial_belief_states: chex.Array   # Indexed by agent role
+
+    
+@struct.dataclass
 class StackedState:
-    """
-    Full state for stacked SignificationPOMDP
-    """
+    agent_utterance_actions_unrendered = chex.Array
+    agent_utterance_actions_rendered = chex.Array
+    # agent_belief_action = chex.Array    # This is the new belief an agent holds 
 
-    decpomdp_state: Any  # An array of states, each one corresponding to a DecPOMDP
+    true_agent_belief_states = chex.Array         # These are the agents' true belief states
+    other_estimated_agent_belief_states = chex.Array   # These are the estimated belief states of agents according to the agents they are engaged in games with
 
-    iteration: int
+    global_rng_key = chex.Array
 
 class StackedSignificationPOMDP():
     """
-    This class has multiple agents that are passed to a series of SignificationPOMDPs
-    This class assigns agents to games according to an assignment scheduler
-        I think it should be agent to global role number, and then global role number to game + game role number
-    We also need to pass a set of 
     """
 
-    def __init__(self, num_agents: int, route_fn: RouteFn) -> None:
+    def __init__(self, num_agents: int, all_env_parameters: FlexibleEnvParams, routing_fn: RouteFn, communication_pattern) -> None:
         """
         Args:
-            num_agents, always divisible by 2
+            num_agents
             env_schedule_function
         """
         self.num_agents = num_agents
-        self.route_fn = route_fn
+        self.all_env_parameters = all_env_parameters
+        self.routing_fn = routing_fn
+        pass
+
+    def step_env(self, key: chex.PRNGKey, state, actions: chex.Array):
+        """
+        This function's job is basically just to listen to the routing function and handle all the communication processes and belief updates, etc. It actually does a lot.
+        """
         pass
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key: chex.PRNGKey):
+        """
+        NOTE: Resetting only happens once I think. The env basically continues on forever according to the routing function.
+        """
 
-        return (initial_environment_state, self.get_obs(key, initial_environment_state))
+        # So agents are either seeing beliefs and utterances and returning beliefs or they are seeing beliefs and something else and returning utterances.
+
+        routing_key, key = jax.random.split(key)
+
+        initial_route = self.routing_fn(key=routing_key, iteration=0)
+
+        # Each agent's initial belief comes from the env parameters of the game
+        agent_game_types = initial_route.game_set[initial_route.agent_game_assignment]  # [num_agents]
+        agent_roles = initial_route.agent_role_assignment                              # [num_agents]
+        agent_initial_belief_states = self.all_env_parameters.initial_belief_states[
+            agent_game_types, agent_roles
+        ]  # [num_agents, *belief_shape]
+
+        # Each agent's initial estimate of the OTHER role's belief in the same game.
+        # (Assumes 2 roles per game, so "the other role" is 1 - role.)
+        other_roles = 1 - agent_roles
+        est_other_initial_belief_states = self.all_env_parameters.initial_belief_states[
+            agent_game_types, other_roles
+        ]  # [num_agents, *belief_shape]
+
+        
+
+        # initial_environment_state = FlexibleGuessingGameState(
+        #     ego_belief_states=agent_initial_belief_states,
+        #     est_other_belief_states=est_other_initial_belief_states,
+        #     agent_game_id=initial_route.agent_game_assignment,
+        #     agent_role_id=agent_roles,
+        #     game_states=jnp.ones(1)
+        # )
+
+        # return (initial_environment_state, self.get_obs(key, initial_environment_state))
+
+        return None
+
+
+if __name__ == "__main__":
+    # env = StackedSignificationPOMDP(num_agents=10, all_env_parameters=)
+    pass
 
 

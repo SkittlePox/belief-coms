@@ -497,8 +497,8 @@ class SignificationPOMDP(MultiAgentEnv):
 
 
 if __name__ == "__main__":
-    from guessing_game import GuessingGame
-    from belief_representations import CategoricalBeliefState
+    from envs.guessing_game_old import GuessingGame
+    from tools.belief_representations import CategoricalBeliefState
 
     key = jax.random.key(0)
 

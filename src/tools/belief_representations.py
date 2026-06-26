@@ -10,13 +10,18 @@ class CategoricalBeliefState:
     """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution.
 
     """
-    def __init__(self, num_unique_states, num_unique_observations_per_agent, num_unique_actions, joint_transition_function, joint_observation_function, joint_action_constructor):
+    def __init__(self, num_unique_states, num_unique_observations, num_unique_actions, joint_transition_function, joint_observation_function, joint_action_constructor):
         self.num_unique_states = num_unique_states
-        self.num_unique_observations_per_agent = num_unique_observations_per_agent
+        # A single observation alphabet shared by all agents: every agent draws
+        # from the same set of `num_unique_observations` possible observations.
+        self.num_unique_observations = num_unique_observations
         self.num_unique_actions = num_unique_actions
         self.joint_transition_function = joint_transition_function
         self.joint_observation_function = joint_observation_function
-        self.joint_factory = JointCategoricalPair(num_unique_observations_per_agent)
+        # The joint observation model O(o0, o1 | s', a) is still correlated, but
+        # both agents now use the same cardinality, so the two per-agent marginals
+        # are the same size (this is what removes the earlier lax.cond mismatch).
+        self.joint_factory = JointCategoricalPair((num_unique_observations, num_unique_observations))
         self.joint_action_constructor = joint_action_constructor
 
     def update_with_observation_and_joint_action(
@@ -104,7 +109,7 @@ class CategoricalBeliefState:
         Args:
             ego_belief_distribution: The ego agent's current belief b(s) as a distrax.Categorical.
             other_belief_distribution_estimate: An estimate of other agent's current belief b̄_S, passed to
-                other_optimal_policy to obtain a distribution over their actions.
+                other_optimal_policy to obtain a distribution over their actions....
             ego_observation: The observation received by the ego agent at this timestep.
             previous_ego_action: The ego agent's own action at the previous timestep (known).
             other_optimal_policy: A callable π* that takes a belief distribution and returns a
@@ -216,7 +221,7 @@ class CategoricalBeliefState:
 
                 return jnp.sum(jax.vmap(per_state)(jnp.arange(self.num_unique_states)))
 
-            all_obs = jnp.arange(self.num_unique_observations[agent_id])
+            all_obs = jnp.arange(self.num_unique_observations)
             weights = jax.vmap(weight_of_obs)(all_obs)          # (O,)
             all_probs = jax.vmap(updated_bj_under_obs)(all_obs) # (O, S)
 
