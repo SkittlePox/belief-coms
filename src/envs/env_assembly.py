@@ -1,4 +1,4 @@
-"""Environment factory for the stacked signification setting.
+"""Environment assembly for the stacked signification setting.
 
 A single game type is described by an :class:`EnvSpec` — a builder returning one
 (unstacked) :class:`FlexibleEnvParams` together with its per-role optimal

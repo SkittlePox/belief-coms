@@ -14,7 +14,7 @@ from tools.belief_representations import CategoricalBeliefState
 
 
 @struct.dataclass
-class CommunicationState:
+class StackedSignificationState:
     """State carried by the StackedSignificationDecPOMDP across step_env calls.
 
     Games are dyadic (num_roles == 2). Agents are indexed ``[num_agents]``; games
@@ -35,6 +35,12 @@ class CommunicationState:
     agent_game_assignment: chex.Array  # [num_agents] -> game index
     agent_role_assignment: chex.Array  # [num_agents] -> role index
     game_types: chex.Array  # [num_games]  -> game-type index
+
+    # Progress: how many underlying-DecPOMDP steps have elapsed this episode (the
+    # in-game iteration ``g``). All games advance in lockstep, so this is a single
+    # scalar shared across games. Used to index a time-varying communication scheme
+    # and to detect the episode horizon. Set at reset (0, or 1 if reset acts first).
+    underlying_iteration: chex.Array  # scalar int
 
     # World: the true DecPOMDP state of each game.
     game_states: chex.Array  # [num_games]
@@ -318,13 +324,20 @@ class StackedSignificationDecPOMDP:
             true_agent_belief_states = agent_initial_belief_states
             other_estimated_agent_belief_states = est_other_initial_belief_states
 
-        return CommunicationState(
+        # The act-first path advanced the underlying DecPOMDP once, so it starts the
+        # episode at in-game iteration 1; the communicate-first path is still at 0.
+        underlying_iteration = jnp.asarray(
+            1 if self.act_on_reset_before_communicating else 0, dtype=jnp.int32
+        )
+
+        return StackedSignificationState(
             # Utterances are produced only by the communication phase, not reset.
             agent_utterance_actions_unrendered=None,
             agent_utterance_actions_rendered=None,
             agent_game_assignment=initial_route.agent_game_assignment,
             agent_role_assignment=agent_roles,
             game_types=game_types_per_game,
+            underlying_iteration=underlying_iteration,
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             other_estimated_agent_belief_states=other_estimated_agent_belief_states,
@@ -334,7 +347,7 @@ class StackedSignificationDecPOMDP:
 
 if __name__ == "__main__":
     from routing import simple_routing_fn
-    from envs.factory import assemble_environments, guessing_game_spec
+    from envs.env_assembly import assemble_environments, guessing_game_spec
 
     # Build the stacked params + policy table from one game type (the guessing game).
     stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
@@ -352,7 +365,9 @@ if __name__ == "__main__":
     state = env.reset(jax.random.key(0))
     print("=== communicate-first reset ===")
     print("game_states:        ", state.game_states)
+    print("underlying_iter:    ", state.underlying_iteration)
     print("true beliefs[0]:    ", state.true_agent_belief_states[0])
+    assert state.underlying_iteration == 0, "communicate-first takes no env step at reset"
 
     # reset (act-first path): one joint action + belief updates before communicating.
     act_env = StackedSignificationDecPOMDP(
@@ -366,8 +381,10 @@ if __name__ == "__main__":
     act_state = act_env.reset(jax.random.key(1))
     print("=== act-first reset ===")
     print("game_states:        ", act_state.game_states)
+    print("underlying_iter:    ", act_state.underlying_iteration)
     print("true beliefs[0]:    ", act_state.true_agent_belief_states[0])
     print("est other belief[0]:", act_state.other_estimated_agent_belief_states[0])
+    assert act_state.underlying_iteration == 1, "act-first advances the env once at reset"
 
     # Direct dispatch check: each agent's belief is routed through its
     # (game_type, role) policy. Both guessing-game roles are identity here, so we

@@ -3,7 +3,7 @@
 This module holds the guessing game's *definition* — the eager tensor builders,
 the per-role optimal policies, and ``guessing_game_spec`` (an EnvSpec). The
 generic runtime lives in envs/flexible_env.py (FlexibleEnv); assembly across
-game types lives in envs/factory.py.
+game types lives in envs/env_assembly.py.
 
 Q&A
 ---

@@ -46,6 +46,6 @@ Other entry points follow the same pattern, e.g.:
 
 ```bash
 PYTHONPATH=. uv run python -m envs.guessing_game
-PYTHONPATH=. uv run python -m envs.factory
-PYTHONPATH=. uv run python -m stacked_signification_pomdp
+PYTHONPATH=. uv run python -m envs.env_assembly
+PYTHONPATH=. uv run python -m stacked_signification_decpomdp
 ```

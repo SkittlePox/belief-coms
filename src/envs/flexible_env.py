@@ -5,7 +5,7 @@ This is the *foundation* of the env-definition dependency graph: it defines
 ``OptimalPolicy`` type, and ``FlexibleEnv`` — a generic runtime that drives any
 ``FlexibleEnvParams`` (reset / step_env / get_obs plus the ``_joint_*`` gather
 API). Per-game-type definitions (e.g. envs/guessing_game.py) build a
-``FlexibleEnvParams``; envs/factory.py stacks them. Neither this module nor the
+``FlexibleEnvParams``; envs/env_assembly.py stacks them. Neither this module nor the
 env-definition modules import the stacked env, keeping the import graph acyclic.
 """
 
