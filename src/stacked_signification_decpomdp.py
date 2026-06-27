@@ -6,6 +6,7 @@ from flax import struct
 from typing import Any, Callable, Sequence
 from functools import partial
 from routing import RouteFn
+from communication_scheme import CommunicationSchemeFn
 
 # FlexibleEnvParams / OptimalPolicy are defined in envs.flexible_env (the leaf of
 # the env-definition dependency graph) and consumed here.
@@ -40,7 +41,8 @@ class StackedSignificationState:
     # in-game iteration ``g``). All games advance in lockstep, so this is a single
     # scalar shared across games. Used to index a time-varying communication scheme
     # and to detect the episode horizon. Set at reset (0, or 1 if reset acts first).
-    underlying_iteration: chex.Array  # scalar int
+    underlying_env_iteration: chex.Array  # scalar int
+    cumulative_env_iteration: chex.Array
 
     # World: the true DecPOMDP state of each game.
     game_states: chex.Array  # [num_games]
@@ -62,7 +64,7 @@ class StackedSignificationDecPOMDP:
         all_env_parameters: FlexibleEnvParams,
         optimal_policies: Sequence[Sequence[OptimalPolicy]],
         routing_fn: RouteFn,
-        communication_pattern,
+        communication_scheme_fn: CommunicationSchemeFn,
         skip_first_communication_step: bool,
     ) -> None:
         """
@@ -74,10 +76,13 @@ class StackedSignificationDecPOMDP:
                 Stored separately from all_env_parameters because callables are not
                 traceable pytree data and cannot be gathered by a traced index.
             routing_fn
+            communication_scheme_fn: Maps the cumulative in-game iteration to the
+                CommunicationScheme in force at that iteration (see communication_scheme.py).
         """
         self.num_agents = num_agents
         self.all_env_parameters = all_env_parameters
         self.routing_fn = routing_fn
+        self.communication_scheme_fn = communication_scheme_fn
         self.act_on_reset_before_communicating = skip_first_communication_step
 
         # Policy table indexed [game_type][role]. Flatten once for lax.switch
@@ -337,7 +342,8 @@ class StackedSignificationDecPOMDP:
             agent_game_assignment=initial_route.agent_game_assignment,
             agent_role_assignment=agent_roles,
             game_types=game_types_per_game,
-            underlying_iteration=underlying_iteration,
+            underlying_env_iteration=underlying_iteration,
+            cumulative_env_iteration=underlying_iteration,
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             other_estimated_agent_belief_states=other_estimated_agent_belief_states,
@@ -347,6 +353,7 @@ class StackedSignificationDecPOMDP:
 
 if __name__ == "__main__":
     from routing import simple_routing_fn
+    from communication_scheme import a_to_b_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
     # Build the stacked params + policy table from one game type (the guessing game).
@@ -357,7 +364,7 @@ if __name__ == "__main__":
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
         routing_fn=simple_routing_fn(num_agents=10, game_type_id=0, agents_per_game=2),
-        communication_pattern=None,
+        communication_scheme_fn=a_to_b_scheme_fn,
         skip_first_communication_step=False,
     )
 
@@ -365,9 +372,9 @@ if __name__ == "__main__":
     state = env.reset(jax.random.key(0))
     print("=== communicate-first reset ===")
     print("game_states:        ", state.game_states)
-    print("underlying_iter:    ", state.underlying_iteration)
+    print("underlying_iter:    ", state.underlying_env_iteration)
     print("true beliefs[0]:    ", state.true_agent_belief_states[0])
-    assert state.underlying_iteration == 0, "communicate-first takes no env step at reset"
+    assert state.underlying_env_iteration == 0, "communicate-first takes no env step at reset"
 
     # reset (act-first path): one joint action + belief updates before communicating.
     act_env = StackedSignificationDecPOMDP(
@@ -375,16 +382,16 @@ if __name__ == "__main__":
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
         routing_fn=simple_routing_fn(num_agents=10, game_type_id=0, agents_per_game=2),
-        communication_pattern=None,
+        communication_scheme_fn=a_to_b_scheme_fn,
         skip_first_communication_step=True,
     )
     act_state = act_env.reset(jax.random.key(1))
     print("=== act-first reset ===")
     print("game_states:        ", act_state.game_states)
-    print("underlying_iter:    ", act_state.underlying_iteration)
+    print("underlying_iter:    ", act_state.underlying_env_iteration)
     print("true beliefs[0]:    ", act_state.true_agent_belief_states[0])
     print("est other belief[0]:", act_state.other_estimated_agent_belief_states[0])
-    assert act_state.underlying_iteration == 1, "act-first advances the env once at reset"
+    assert act_state.underlying_env_iteration == 1, "act-first advances the env once at reset"
 
     # Direct dispatch check: each agent's belief is routed through its
     # (game_type, role) policy. Both guessing-game roles are identity here, so we
