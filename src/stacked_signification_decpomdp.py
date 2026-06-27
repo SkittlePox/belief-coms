@@ -14,6 +14,12 @@ from envs.flexible_env import FlexibleEnvParams, OptimalPolicy
 from tools.belief_representations import CategoricalBeliefState
 
 
+# A communicative round runs in two stages, one per step_env call; the state's
+# communicative_round_stage records which stage the current step is in.
+UTTERANCE_STAGE = 0  # the speaker emits an utterance / message action
+BELIEF_STAGE = 1     # the listener emits a belief action, completing the round
+
+
 @struct.dataclass
 class StackedSignificationState:
     """State carried by the StackedSignificationDecPOMDP across step_env calls.
@@ -41,8 +47,24 @@ class StackedSignificationState:
     # in-game iteration ``g``). All games advance in lockstep, so this is a single
     # scalar shared across games. Used to index a time-varying communication scheme
     # and to detect the episode horizon. Set at reset (0, or 1 if reset acts first).
-    underlying_env_iteration: chex.Array  # scalar int
-    cumulative_env_iteration: chex.Array
+    underlying_env_iteration: chex.Array  # scalar int; resets to 0 at each episode boundary
+    cumulative_env_iteration: chex.Array  # scalar int; never resets; the key passed to communication_scheme_fn
+
+    # Communication schedule: the active block, stored flat as its who_speaks /
+    # total_num_rounds (re-fetched from communication_scheme_fn on each underlying-env
+    # step, keyed by cumulative_env_iteration), plus the cursors that walk it. The
+    # instantaneous who-speaks for the current round is
+    # active_who_speaks[underlying_communication_round_iterator].
+    active_who_speaks: chex.Array                         # [num_rounds (padded), num_speakers]
+    active_total_num_rounds: chex.Array                   # scalar int: real round count of the active block (excludes padding)
+    underlying_communication_round_iterator: chex.Array   # scalar int: round within the active block (0..total_num_rounds-1); advances once per completed (two-step) round
+    cumulative_communication_round_iterator: chex.Array   # scalar int: total step_env calls (two per who_speaks round); never resets
+
+    # Two-stage rounds: each who_speaks round spans TWO step_env iterations. The
+    # speaker emits an utterance on UTTERANCE_STAGE, then the listener emits a belief
+    # action on BELIEF_STAGE, which completes the round and advances
+    # underlying_communication_round_iterator.
+    communicative_round_stage: chex.Array                 # scalar int: UTTERANCE_STAGE or BELIEF_STAGE
 
     # World: the true DecPOMDP state of each game.
     game_states: chex.Array  # [num_games]
@@ -184,10 +206,64 @@ class StackedSignificationDecPOMDP:
             game_type, branches, ego_belief, other_belief_estimate, observation, action
         )
 
-    def step_env(self, key: chex.PRNGKey, state, actions: chex.Array):
+    def step_env(self, key: chex.PRNGKey, state, utterance_actions: chex.Array, belief_actions: chex.Array):
         """
         This function's job is basically just to listen to the routing function and handle all the communication processes and belief updates, etc. It actually does a lot.
         """
+        # We assume that utterance_actions and belief_actions are size [num_agents, ?].
+        #
+        # ------------------------------------------------------------------ TODO
+        # IMPORTANT: each who_speaks round spans TWO step_env iterations / stages,
+        # tracked by state.communicative_round_stage -- the speaker emits an utterance
+        # action on UTTERANCE_STAGE, the listener emits a belief action on BELIEF_STAGE,
+        # which COMPLETES the round. So the round cursor advances (and the env may step)
+        # only on BELIEF_STAGE. Nothing below is implemented.
+        #
+        # 1. Read this round's speakers from the active block:
+        #        who_speaks_now = state.active_who_speaks[
+        #            state.underlying_communication_round_iterator]            # [num_speakers]
+        #    We only consume utterance_actions for agents whose role speaks this round;
+        #    the rest contribute belief_actions / nothing.
+        #
+        # 2. Branch on state.communicative_round_stage (which stage of the round):
+        #    a. UTTERANCE_STAGE: speaking agents emit utterances from their current
+        #       belief (consume utterance_actions for agents whose role speaks this
+        #       round); stash them in agent_utterance_actions_*. Advance the stage to
+        #       BELIEF_STAGE. The round cursor does NOT move and the env does NOT step
+        #       -> return here.
+        #    b. BELIEF_STAGE: listening agents update true belief + other-belief-estimate
+        #       from the utterance stashed last step (consume belief_actions). Reset the
+        #       stage to UTTERANCE_STAGE. The round is now complete; continue to steps 3-4.
+        #
+        # 3. (BELIEF_STAGE only) the act coincides with the block's last REAL round
+        #    (total_num_rounds excludes padding):
+        #        is_act = (state.underlying_communication_round_iterator
+        #                  == state.active_total_num_rounds - 1)
+        #
+        # 4. If is_act: step every game's DecPOMDP (actions, transition, observation,
+        #    belief-from-observation update), advance game_states, then
+        #        underlying_env_iteration               += 1
+        #        cumulative_env_iteration               += 1
+        #        underlying_communication_round_iterator  = 0
+        #        (active_who_speaks, active_total_num_rounds) <- unpack
+        #            self.communication_scheme_fn(cumulative_env_iteration)   # the NEXT block
+        #    Else (still mid-block):
+        #        underlying_communication_round_iterator += 1
+        #
+        # 5. Always: cumulative_communication_round_iterator += 1  (counts step_env
+        #    calls -- two per who_speaks round).
+        #
+        # 6. Episode boundary (only reachable on an act step): if
+        #    underlying_env_iteration == the episode horizon (the route's
+        #    underlying_env_steps_per_episode), end the episode -- re-route (new
+        #    assignment + horizon, keyed by an episode index), resample initial world
+        #    states, reset beliefs, and set underlying_env_iteration = 0
+        #    (cumulative_env_iteration keeps counting). Games that terminate early are
+        #    masked until the boundary rather than re-routed individually.
+        #
+        # 7. Assemble and return the next StackedSignificationState (plus whatever
+        #    observations / rewards the caller needs).
+        # --------------------------------------------------------------------------
         pass
 
     @partial(jax.jit, static_argnums=(0,))
@@ -330,10 +406,16 @@ class StackedSignificationDecPOMDP:
             other_estimated_agent_belief_states = est_other_initial_belief_states
 
         # The act-first path advanced the underlying DecPOMDP once, so it starts the
-        # episode at in-game iteration 1; the communicate-first path is still at 0.
+        # episode at in-game iteration 1; the communicate-first path is still at 0. At
+        # reset the per-episode and cumulative env iterations coincide.
         underlying_iteration = jnp.asarray(
             1 if self.act_on_reset_before_communicating else 0, dtype=jnp.int32
         )
+
+        # Fetch the first active communication block, keyed by cumulative_env_iteration
+        # (== underlying_iteration at reset), and store it flat. The round cursors start
+        # at the block's first round; no communication rounds have run yet.
+        active_scheme = self.communication_scheme_fn(underlying_iteration)
 
         return StackedSignificationState(
             # Utterances are produced only by the communication phase, not reset.
@@ -344,6 +426,12 @@ class StackedSignificationDecPOMDP:
             game_types=game_types_per_game,
             underlying_env_iteration=underlying_iteration,
             cumulative_env_iteration=underlying_iteration,
+            active_who_speaks=active_scheme.who_speaks,
+            active_total_num_rounds=active_scheme.total_num_rounds,
+            underlying_communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
+            cumulative_communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
+            # Reset starts on the utterance stage (the speaker emits first).
+            communicative_round_stage=jnp.asarray(UTTERANCE_STAGE, dtype=jnp.int32),
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             other_estimated_agent_belief_states=other_estimated_agent_belief_states,
@@ -373,8 +461,15 @@ if __name__ == "__main__":
     print("=== communicate-first reset ===")
     print("game_states:        ", state.game_states)
     print("underlying_iter:    ", state.underlying_env_iteration)
+    print("active who_speaks:  ", state.active_who_speaks.tolist())
+    print("active rounds:      ", state.active_total_num_rounds)
+    print("round iters (u,c):  ", state.underlying_communication_round_iterator,
+          state.cumulative_communication_round_iterator)
+    print("round stage:        ", state.communicative_round_stage)
     print("true beliefs[0]:    ", state.true_agent_belief_states[0])
     assert state.underlying_env_iteration == 0, "communicate-first takes no env step at reset"
+    assert state.underlying_communication_round_iterator == 0, "round cursor starts at 0"
+    assert state.communicative_round_stage == UTTERANCE_STAGE, "reset starts on the utterance stage"
 
     # reset (act-first path): one joint action + belief updates before communicating.
     act_env = StackedSignificationDecPOMDP(

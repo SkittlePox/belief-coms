@@ -1,3 +1,21 @@
+"""Communication schemes for the StackedSignificationDecPOMDP.
+
+A CommunicationScheme is a fixed sequence of communication rounds; a
+CommunicationSchemeFn maps an iteration to the scheme in force at that iteration.
+
+Design Q&A
+----------
+Q: Can different games run different communication schemes at the same timestep?
+A: No. ``communication_scheme_fn(iteration)`` returns a *single* CommunicationScheme,
+   and that one scheme governs every game at that iteration. The scheme may vary
+   *across* iterations (e.g. the odd/even split in ``simple_communication_scheme_fn``,
+   or a change over training), but within a given iteration all games communicate
+   identically -- there is no per-game scheme axis. Supporting per-game schemes would
+   mean indexing the scheme by game (the way ``game_set`` indexes game type in
+   routing.py); we intentionally do not, accepting one global scheme per iteration
+   for simplicity.
+"""
+
 import jax
 import chex
 import jax.numpy as jnp
