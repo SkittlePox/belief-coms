@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated visualization HTML
+src/useful_visualizations/renders/

@@ -8,4 +8,5 @@ dependencies = [
     "distrax>=0.1.5",
     "flax>=0.10.4",
     "jaxmarl>=0.1.0",
+    "plotly>=6.8.0",
 ]
