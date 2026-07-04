@@ -45,6 +45,13 @@ NUM_STEPS = 12  # two acts (steps 6 & 12); the 2nd act hits the horizon -> a bou
 
 # Two-tone discrete scale for roles in the routing panel.
 ROLE_SCALE = [[0.0, F.ACCENT], [0.5, F.ACCENT], [0.5, F.ACCENT_2], [1.0, F.ACCENT_2]]
+# Warm light->orange scale for the "actions taken" panel (distinct from the teal beliefs).
+ACTION_SCALE = [[0.0, "#fff5eb"], [1.0, F.ACCENT_2]]
+
+
+def _action_labels(num_actions):
+    """Guessing-game action names: press s0..s{A-2}, then wait."""
+    return [f"press s{a}" for a in range(num_actions - 1)] + ["wait"]
 
 
 def _build_env():
@@ -65,7 +72,8 @@ def _build_env():
 
 def _rollout(env):
     """Drive NUM_STEPS step_env calls with scripted inputs; return per-step snapshots."""
-    state = env.reset(jax.random.key(0))
+    # reset / step_env now return (state, observations); we read the state.
+    state, _obs = env.reset(jax.random.key(0))
     num_states = int(state.true_agent_belief_states.shape[-1])
 
     # Scripted stand-ins (mirror the module's __main__): every agent utters all-ones,
@@ -78,7 +86,7 @@ def _rollout(env):
 
     snaps = [_snapshot(state)]
     for t in range(NUM_STEPS):
-        state = env.step_env(jax.random.key(t), state, utt, other_est, valid_belief)
+        state, _obs = env.step_env(jax.random.key(t), state, utt, other_est, valid_belief)
         snaps.append(_snapshot(state))
     return snaps
 
@@ -99,6 +107,7 @@ def _snapshot(state):
         true_beliefs=np.asarray(state.true_agent_belief_states),
         est_beliefs=np.asarray(state.estimated_agent_belief_states),
         rewards=np.asarray(state.last_agent_rewards),
+        actions=np.asarray(state.last_agent_actions),  # -1 on non-act steps
     )
 
 
@@ -110,11 +119,22 @@ def _routing_matrix(snap, num_games):
     return m
 
 
-def _traces(snap, num_games, num_states):
-    """The six animatable traces, in a fixed order (matches the subplot cells)."""
+def _actions_matrix(snap, num_actions):
+    """[agent, action] one-hot at the action each agent took; all-zero where -1 (no act)."""
+    m = np.zeros((NUM_AGENTS, num_actions))
+    for a in range(NUM_AGENTS):
+        act = int(snap["actions"][a])
+        if act >= 0:
+            m[a, act] = 1.0
+    return m
+
+
+def _traces(snap, num_games, num_states, num_actions):
+    """The seven animatable traces, in a fixed order (matches the subplot cells)."""
     agent_labels = [f"agent {i}" for i in range(NUM_AGENTS)]
     game_labels = [f"game {g}" for g in range(num_games)]
     state_labels = [f"s={s}" for s in range(num_states)]
+    action_labels = _action_labels(num_actions)
 
     routing = go.Heatmap(
         z=_routing_matrix(snap, num_games), x=game_labels, y=agent_labels,
@@ -141,13 +161,22 @@ def _traces(snap, num_games, num_states):
         snap["est_beliefs"], x=state_labels, y=agent_labels,
         colorscale=F.PROB_SCALE, zmin=0, zmax=1, showscale=False, hover="P",
     )
+    actions_m = _actions_matrix(snap, num_actions)
+    actions = go.Heatmap(
+        z=actions_m, x=action_labels, y=agent_labels,
+        colorscale=ACTION_SCALE, zmin=0, zmax=1, showscale=False,
+        text=[[action_labels[j] if actions_m[i, j] > 0 else "" for j in range(num_actions)]
+              for i in range(NUM_AGENTS)],
+        texttemplate="%{text}", textfont=dict(size=10),
+        hovertemplate="%{y} took %{x}<extra></extra>",
+    )
     rewards = go.Bar(
         x=agent_labels, y=snap["rewards"], showlegend=False,
         marker_color=[F.ACCENT_2 if r >= 0 else "#c0392b" for r in snap["rewards"]],
         text=[f"{r:+.2f}" for r in snap["rewards"]], textposition="outside", cliponaxis=False,
         hovertemplate="%{x}: %{y:+.3f}<extra></extra>",
     )
-    return [routing, world, counters, true_b, est_b, rewards]
+    return [routing, world, counters, true_b, est_b, actions, rewards]
 
 
 def _title(step, snap, is_act, is_boundary):
@@ -171,40 +200,43 @@ def render() -> str:
     snaps = _rollout(env)
     num_games = NUM_AGENTS // 2
     num_states = snaps[0]["true_beliefs"].shape[-1]
+    num_actions = int(env.all_env_parameters.transition.shape[2])  # padded action count
 
     # Per-step flags inferred from consecutive snapshots.
     is_act = [False] + [snaps[i]["cum_env"] > snaps[i - 1]["cum_env"] for i in range(1, len(snaps))]
     is_boundary = [False] + [snaps[i]["episode"] > snaps[i - 1]["episode"] for i in range(1, len(snaps))]
 
     fig = make_subplots(
-        rows=2, cols=3,
+        rows=3, cols=3,
         specs=[[{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
-               [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}]],
-        row_heights=[0.5, 0.5], vertical_spacing=0.13, horizontal_spacing=0.08,
+               [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
+               [{"colspan": 3, "type": "xy"}, None, None]],
+        row_heights=[0.30, 0.44, 0.26], vertical_spacing=0.11, horizontal_spacing=0.08,
         subplot_titles=(
             "routing — agents ▸ (game, role)",
             "world — each game's true state",
             "scheduler counters",
             "true beliefs  b_i(s)   [agent × state]",
             "estimated beliefs  (estimate ABOUT agent i)",
+            "actions taken  [agent × action]  (lit only on ACT steps)",
             "last agent rewards  (nonzero only on acts)",
         ),
     )
 
-    base = _traces(snaps[0], num_games, num_states)
-    positions = [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3)]
+    base = _traces(snaps[0], num_games, num_states, num_actions)
+    positions = [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1)]
     for trace, (r, c) in zip(base, positions):
         fig.add_trace(trace, row=r, col=c)
 
-    # Grids read top-down; bar axes get sensible ranges.
-    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2)]:
+    # Grids read top-down (agent 0 on top); bar axes get sensible ranges.
+    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3)]:
         fig.update_yaxes(autorange="reversed", row=r, col=c)
     # Headroom so the outside value labels on the bars don't clip.
     counter_max = max(
         max(s["env_iter"], s["cum_env"], s["round_cursor"], s["cum_round"]) for s in snaps
     )
     fig.update_yaxes(title_text="count", range=[0, counter_max * 1.25 + 1], row=1, col=3)
-    fig.update_yaxes(title_text="reward", range=[-1.4, 1.4], row=2, col=3)
+    fig.update_yaxes(title_text="reward", range=[-1.4, 1.4], row=3, col=1)
 
     frames, labels = [], []
     for i, snap in enumerate(snaps):
@@ -212,8 +244,8 @@ def render() -> str:
         frames.append(
             go.Frame(
                 name=str(i),
-                data=_traces(snap, num_games, num_states),
-                traces=[0, 1, 2, 3, 4, 5],
+                data=_traces(snap, num_games, num_states, num_actions),
+                traces=[0, 1, 2, 3, 4, 5, 6],
                 layout=go.Layout(title=dict(text=_title(step, snap, is_act[i], is_boundary[i]))),
             )
         )
@@ -222,7 +254,7 @@ def render() -> str:
         labels.append(("reset" if step < 0 else f"step {step}") + tag)
 
     fig.update_layout(
-        height=1000,
+        height=1080,
         margin=dict(l=60, r=30, t=90, b=60),
         title=dict(text=_title(-1, snaps[0], False, False)),
     )

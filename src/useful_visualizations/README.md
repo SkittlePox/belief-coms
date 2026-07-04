@@ -28,7 +28,7 @@ PYTHONPATH=. uv run python -m useful_visualizations.viz_stacked
 | --- | --- | --- |
 | `viz_distributions.py` | `JointCategoricalPair` (`tools/distributions.py`) | **Interactive.** Edit the joint `P(var1, var2)` grid and everything recomputes live in-browser: the flat vector, its `(v1, v2)` reshape, both marginals, a conditional (pick which `var1`), and an empirical sample grid. `reset example` / `uniform` / `clear` presets. |
 | `viz_guessing_game.py` | The guessing game's `transition` / `observation` / `reward` tensors + a `FlexibleEnv` rollout | The three dense tensors from `guessing_game_spec`, then a **slider** over the "learning by waiting" rollout — watch the presser's belief collapse to the truth as each observed symbol rules out a state. |
-| `viz_stacked.py` | `StackedSignificationDecPOMDP` state + `step_env` trace | The star. A per-step dashboard (routing, world states, scheduler counters, true vs estimated beliefs, rewards) with a **slider** over many `step_env` calls. The title reads out stage / round / episode and flags **ACT** and **EPISODE BOUNDARY** steps. |
+| `viz_stacked.py` | `StackedSignificationDecPOMDP` state + `step_env` trace | The star. A per-step dashboard (routing, world states, scheduler counters, true vs estimated beliefs, **actions taken**, rewards) with a **slider** over many `step_env` calls. The actions panel (`[agent × action]`, read from `state.last_agent_actions`) lights up only on **ACT** steps — showing which button each agent pressed / whether it waited. The title reads out stage / round / episode and flags **ACT** and **EPISODE BOUNDARY** steps. |
 
 ## Notes
 

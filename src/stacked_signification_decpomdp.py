@@ -160,6 +160,11 @@ class StackedSignificationState:
     # stacked game's reward signal). Zero on non-act (communication-only) steps.
     last_agent_rewards: chex.Array  # [num_agents]
 
+    # Debug: each agent's underlying-DecPOMDP action from the most recent act (the
+    # action it actually took in its game). -1 on non-act (communication-only) steps.
+    # Kept purely for inspection/verification; not consumed by the dynamics.
+    last_agent_actions: chex.Array  # [num_agents]
+
     global_rng_key: chex.Array
 
 
@@ -345,8 +350,10 @@ class StackedSignificationDecPOMDP:
         the update and scatter the refreshed estimates back the same way afterward.
 
         Returns (next_game_states, next_true_beliefs, next_estimated_beliefs,
-        agent_rewards), where agent_rewards[i] is agent i's underlying-DecPOMDP reward
-        R(s, a0, a1, s') for this step -- the reward signal for the stacked game.
+        agent_rewards, agent_actions), where agent_rewards[i] is agent i's
+        underlying-DecPOMDP reward R(s, a0, a1, s') for this step -- the reward signal
+        for the stacked game -- and agent_actions[i] is the action agent i sampled and
+        actually took in its game (kept for debugging/verification).
         """
         num_games = game_states.shape[0]
         agent_game_types = game_types_per_game[agent_game_assignment]  # [num_agents]
@@ -443,7 +450,7 @@ class StackedSignificationDecPOMDP:
         # it subject-indexed -- the estimate ABOUT agent k lives at k, held by k's partner,
         # which is again a gather by partner_agent (the map is its own inverse in a dyad).
         next_estimated = next_estimate_of_partner[partner_agent]  # [num_agents, S]
-        return game_next_states, next_true, next_estimated, agent_rewards
+        return game_next_states, next_true, next_estimated, agent_rewards, agent_actions
 
     def step_env(self, key: chex.PRNGKey, state: StackedSignificationState, utterance_actions: chex.Array, belief_estimate_after_uttering: chex.Array, belief_actions: chex.Array):
         """
@@ -579,6 +586,7 @@ class StackedSignificationDecPOMDP:
                 next_true_agent_belief_states,
                 next_estimated_agent_belief_states,
                 jnp.zeros((self.num_agents,), dtype=jnp.float32),
+                -jnp.ones((self.num_agents,), dtype=jnp.int32),
             )
 
         (
@@ -586,6 +594,7 @@ class StackedSignificationDecPOMDP:
             true_beliefs_after_act,
             estimated_beliefs_after_act,
             agent_rewards_after_act,
+            agent_actions_after_act,
         ) = jax.lax.cond(is_act, do_act, skip_act, operand=None)
 
         # === Bit 5: episode boundary ========================================
@@ -661,8 +670,9 @@ class StackedSignificationDecPOMDP:
             true_agent_belief_states=ep_true_beliefs,
             estimated_agent_belief_states=ep_estimated_beliefs,
             # The act's reward is this step's signal even when it also ends the episode;
-            # the boundary reset does not clear it.
+            # the boundary reset does not clear it. Same for the debug actions.
             last_agent_rewards=agent_rewards_after_act,
+            last_agent_actions=agent_actions_after_act,
         )
 
         # Observation reflects the NEW stage (the action the agent will take next); its
@@ -730,8 +740,9 @@ class StackedSignificationDecPOMDP:
         game_states = init["game_states"]
         true_agent_belief_states = init["true_agent_belief_states"]
         estimated_agent_belief_states = init["estimated_agent_belief_states"]
-        # No act on the communicate-first path, so no reward yet.
+        # No act on the communicate-first path, so no reward and no action yet.
         last_agent_rewards = jnp.zeros((self.num_agents,), dtype=jnp.float32)
+        last_agent_actions = -jnp.ones((self.num_agents,), dtype=jnp.int32)
 
         if self.act_on_reset_before_communicating:
             # Take one joint DecPOMDP step before any communication; beliefs update from
@@ -742,6 +753,7 @@ class StackedSignificationDecPOMDP:
                 true_agent_belief_states,
                 estimated_agent_belief_states,
                 last_agent_rewards,
+                last_agent_actions,
             ) = self._step_underlying_env(
                 step_key,
                 game_states,
@@ -789,6 +801,7 @@ class StackedSignificationDecPOMDP:
             true_agent_belief_states=true_agent_belief_states,
             estimated_agent_belief_states=estimated_agent_belief_states,
             last_agent_rewards=last_agent_rewards,
+            last_agent_actions=last_agent_actions,
             global_rng_key=key,
         )
         # Reset starts on the utterance stage, so the observation has utterances NaN'd.
@@ -943,12 +956,18 @@ if __name__ == "__main__":
     print("  reset:  ", fmt(s))
     for t in range(6):
         s, _ = sched_env.step_env(jax.random.key(t), s, utt, other_est, valid_belief)
-        print(f"  step {t}:", fmt(s), "reward_sum=", float(s.last_agent_rewards.sum()))
+        print(f"  step {t}:", fmt(s),
+              "reward_sum=", float(s.last_agent_rewards.sum()),
+              "actions=", s.last_agent_actions.tolist())
         # The act is the last belief stage (step 5); every earlier (communication-only)
-        # step leaves the reward signal at zero.
+        # step leaves the reward signal at zero and the debug actions at the -1 sentinel.
         if t < 5:
             assert jnp.all(s.last_agent_rewards == 0.0), "no reward on communication-only steps"
+            assert jnp.all(s.last_agent_actions == -1), "no action on communication-only steps"
+        else:
+            assert jnp.all(s.last_agent_actions >= 0), "act step records real actions"
     assert s.last_agent_rewards.shape == (10,), "reward is per-agent"
+    assert s.last_agent_actions.shape == (10,), "action is per-agent"
     assert int(s.underlying_env_iteration) == 1, "one block (6 stages) == one env step"
     assert int(s.underlying_communication_round_iterator) == 0, "cursor wrapped after the act"
     assert int(s.communicative_round_stage) == UTTERANCE_STAGE, "back to utterance after the act"

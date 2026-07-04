@@ -26,6 +26,8 @@ I decided that the structure of the environments will largely be the same, so I'
 
 Hmm okay this is very interesting. If everything is a guessing game it makes the code way easier to write because the transition function can actually be identical and parameterized by vectors in the state. This would actually be quite wise. So I should transition to code that just handles guessing games of various kinds, and keeps the relevant transition and reward dynamics info stored in a vector somewhere. I think that should be possible for a narrow set of guessing games. Time to sketch the games out...
 
+I think this is the end of stacked_signification_decpomdp.py. I'll need to build visualizations to double-check it works as expected.
+
 # Running
 
 The project is **not installed as a package**. The code uses fully-qualified
