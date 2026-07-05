@@ -493,7 +493,7 @@ class StackedSignificationDecPOMDP:
         next_estimated = next_estimate_of_partner[partner_agent]  # [num_agents, S]
         return game_next_states, next_true, next_estimated, agent_rewards, agent_actions, agent_observations
 
-    def step_env(self, key: chex.PRNGKey, state: StackedSignificationState, utterance_actions: chex.Array, belief_estimate_post_utterance: chex.Array, belief_actions: chex.Array):
+    def _step_env_impl(self, key: chex.PRNGKey, state: StackedSignificationState, utterance_actions: chex.Array, belief_estimate_post_utterance: chex.Array, belief_actions: chex.Array):
         """
         This method has many important jobs, but the main thing it does is abstract away the complexity
         of the underlying DecPOMDPs the agents are engaged in. This method is a transition function for
@@ -519,8 +519,13 @@ class StackedSignificationDecPOMDP:
                 estimate ABOUT agent i's belief state).
             belief_actions: [num_agents, S], AGENT-indexed (row i is agent i's proposed new
                 belief, a distribution over its game's S world states).
+
+        Returns (pre_act_state, state, observation, rewards). pre_act_state is the substate
+        after communication has resolved but before the underlying world steps -- only
+        meaningful on act steps. The public ``step_env`` wrapper drops it (returning the
+        usual (state, observation, rewards)); ``step_env_with_substate`` exposes it.
         """
-        
+
         act_key, boundary_key, obs_key = jax.random.split(key, 3)
 
         # This round's speakers, over ROLES, mapped to a per-agent mask.
@@ -573,6 +578,21 @@ class StackedSignificationDecPOMDP:
         update_listener_true_belief = on_belief_stage & agent_listens_binary_mask  # [num_agents]
         next_true_agent_belief_states = jnp.where(
             update_listener_true_belief[:, None], belief_actions, state.true_agent_belief_states
+        )
+
+        # === Substate: communication resolved, world not yet stepped ========
+        # A plottable snapshot of the moment BETWEEN communication and the world step:
+        # beliefs have been adopted (next_true / next_estimated) but the underlying DecPOMDP
+        # has NOT transitioned yet, so world states, routing and the scheduler are still the
+        # incoming `state`'s, and the act outputs sit at their no-act sentinels. It reuses
+        # this same dataclass -- no new fields -- and is only meaningful on act steps (where
+        # the world is about to move). Callers that want it use step_env_with_substate.
+        pre_act_state = state.replace(
+            true_agent_belief_states=next_true_agent_belief_states,
+            estimated_agent_belief_states=next_estimated_agent_belief_states,
+            last_agent_rewards=jnp.zeros((self.num_agents,), dtype=jnp.float32),
+            last_agent_actions=-jnp.ones((self.num_agents,), dtype=jnp.int32),
+            last_agent_observations=-jnp.ones((self.num_agents,), dtype=jnp.int32),
         )
 
         # === Bit 3: scheduling state machine ================================
@@ -737,7 +757,32 @@ class StackedSignificationDecPOMDP:
         # environment reward for this step is returned alongside (also readable off
         # state.last_agent_rewards): it is the act's reward on an act step and zero on a
         # communication-only step.
-        return state, self.get_obs(obs_key, state), state.last_agent_rewards
+        obs = self.get_obs(obs_key, state)
+        return pre_act_state, state, obs, state.last_agent_rewards
+
+    def step_env(self, key: chex.PRNGKey, state: StackedSignificationState, utterance_actions: chex.Array, belief_estimate_post_utterance: chex.Array, belief_actions: chex.Array):
+        """Public transition function: returns (state, observation, rewards).
+
+        Thin wrapper over ``_step_env_impl`` that drops the pre-act substate, preserving the
+        original (state, observation, rewards) contract for training and rollouts.
+        """
+        _pre_act, state, obs, rewards = self._step_env_impl(
+            key, state, utterance_actions, belief_estimate_post_utterance, belief_actions
+        )
+        return state, obs, rewards
+
+    def step_env_with_substate(self, key: chex.PRNGKey, state: StackedSignificationState, utterance_actions: chex.Array, belief_estimate_post_utterance: chex.Array, belief_actions: chex.Array):
+        """Like ``step_env`` but also returns the pre-act substate for inspection/plotting.
+
+        Returns (pre_act_state, state, observation, rewards). On an act step, pre_act_state
+        is the snapshot after communication resolves but before the world steps (post-
+        communication beliefs, old world/routing, no reward/action/observation yet); on a
+        communication-only step it carries the same beliefs as the returned state and is not
+        typically plotted as a separate frame.
+        """
+        return self._step_env_impl(
+            key, state, utterance_actions, belief_estimate_post_utterance, belief_actions
+        )
 
     def _begin_episode(self, key, episode_index):
         """Route a fresh episode and produce its initial fields.

@@ -43,8 +43,8 @@ from communication_scheme import b_to_a_scheme_fn
 
 from . import _figures as F
 
-NUM_AGENTS = 6
-NUM_STEPS = 12  # b_to_a: 1 round/block -> an act every 2 steps (6 acts); boundary every 2 acts
+NUM_AGENTS = 2  # one dyadic game
+NUM_STEPS = 12  # b_to_a: 1 round/block -> an act every 2 steps (6 acts); horizon 4 -> boundary every ~3 acts
 
 # Two-tone discrete scale for roles in the routing panel.
 ROLE_SCALE = [[0.0, F.ACCENT], [0.5, F.ACCENT], [0.5, F.ACCENT_2], [1.0, F.ACCENT_2]]
@@ -71,7 +71,7 @@ def _build_env():
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
         routing_fn=simple_routing_fn(
-            num_agents=NUM_AGENTS, agents_per_game=2, underlying_env_steps_per_episode=2
+            num_agents=NUM_AGENTS, agents_per_game=2, underlying_env_steps_per_episode=4
         ),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -81,9 +81,15 @@ def _build_env():
 
 
 def _rollout(env):
-    """Drive NUM_STEPS step_env calls with scripted inputs; return per-step snapshots."""
-    # reset returns (state, observations); step_env returns (state, observations,
-    # rewards). We read everything we plot off the state, so we drop obs and rewards.
+    """Drive NUM_STEPS steps with scripted inputs; return the per-frame snapshots.
+
+    Act steps are split into two frames: a pre-act substate (communication resolved, world
+    about to step) and the post-act state (world stepped). Communication-only steps stay a
+    single frame. Each snapshot is tagged with its step index and phase for labeling.
+    """
+    # reset returns (state, observations); step_env_with_substate returns
+    # (pre_act_state, state, observations, rewards). We read everything we plot off the
+    # states, so we drop obs and rewards.
     state, _obs = env.reset(jax.random.key(0))
     num_states = int(state.true_agent_belief_states.shape[-1])
 
@@ -95,10 +101,26 @@ def _rollout(env):
     other_est = state.true_agent_belief_states.at[:, 0].add(0.5)
     other_est = other_est / other_est.sum(axis=-1, keepdims=True)
 
-    snaps = [_snapshot(state)]
+    def tagged(state_, step, phase):
+        snap = _snapshot(state_)
+        snap["step"] = step
+        snap["phase"] = phase
+        return snap
+
+    # The reset frame is special: with skip_first_communication_step=True it has already
+    # acted once inside reset() (an act that is not surfaced as a separate substate).
+    snaps = [tagged(state, -1, "reset")]
     for t in range(NUM_STEPS):
-        state, _obs, _rewards = env.step_env(jax.random.key(t), state, utt, other_est, valid_belief)
-        snaps.append(_snapshot(state))
+        pre_act, state, _obs, _rewards = env.step_env_with_substate(
+            jax.random.key(t), state, utt, other_est, valid_belief
+        )
+        # An act step advances cumulative_env_iteration; only then is the pre-act substate
+        # (communication resolved, world not yet stepped) a distinct, informative frame, so
+        # we splice it in as sub-frame "a" ahead of the post-act world-step frame "b".
+        is_act = int(state.cumulative_env_iteration) > int(pre_act.cumulative_env_iteration)
+        if is_act:
+            snaps.append(tagged(pre_act, t, "pre_act"))
+        snaps.append(tagged(state, t, "act" if is_act else "comm"))
     return snaps
 
 
@@ -211,14 +233,28 @@ def _traces(snap, num_games, num_states, num_actions, num_obs):
     return [routing, world, counters, true_b, est_b, actions, rewards, observations]
 
 
-def _title(step, snap, is_act, is_boundary):
+def _step_label(snap):
+    """Frame label from the snapshot's phase: reset, step N, or the a/b sub-frames of an act."""
+    if snap["phase"] == "reset":
+        return "reset"
+    label = f"step {snap['step']}"
+    if snap["phase"] == "pre_act":
+        return label + "a"   # communication resolved, world about to step
+    if snap["phase"] == "act":
+        return label + "b"   # world stepped
+    return label             # communication-only step
+
+
+def _title(snap, is_act, is_boundary):
     stage = "UTTERANCE" if snap["stage"] == UTTERANCE_STAGE else "BELIEF"
     tags = ""
+    if snap["phase"] == "pre_act":
+        tags += "   · communication resolved (world about to step)"
     if is_act:
         tags += "   · ACT (world steps)"
     if is_boundary:
         tags += "   · EPISODE BOUNDARY (re-route)"
-    head = "reset" if step < 0 else f"step {step}"
+    head = _step_label(snap)
     return (
         f"StackedSignificationDecPOMDP — {head}<br>"
         f"<span style='font-size:13px;color:{F.MUTED}'>"
@@ -235,8 +271,9 @@ def render() -> str:
     num_actions = int(env.all_env_parameters.transition.shape[2])  # padded action count
     num_obs = int(env.all_env_parameters.observation.shape[-1])  # per-agent observation count
 
-    # Per-step flags inferred from consecutive snapshots.
-    is_act = [False] + [snaps[i]["cum_env"] > snaps[i - 1]["cum_env"] for i in range(1, len(snaps))]
+    # Per-frame flags. The act frame ("b") is the world-step; a boundary shows up as the
+    # episode index incrementing on that same post-act frame.
+    is_act = [snap["phase"] == "act" for snap in snaps]
     is_boundary = [False] + [snaps[i]["episode"] > snaps[i - 1]["episode"] for i in range(1, len(snaps))]
 
     fig = make_subplots(
@@ -274,23 +311,23 @@ def render() -> str:
 
     frames, labels = [], []
     for i, snap in enumerate(snaps):
-        step = i - 1  # snap 0 is the reset
         frames.append(
             go.Frame(
                 name=str(i),
                 data=_traces(snap, num_games, num_states, num_actions, num_obs),
                 traces=[0, 1, 2, 3, 4, 5, 6, 7],
-                layout=go.Layout(title=dict(text=_title(step, snap, is_act[i], is_boundary[i]))),
+                layout=go.Layout(title=dict(text=_title(snap, is_act[i], is_boundary[i]))),
             )
         )
-        tag = " ★act" if is_act[i] else ""
+        tag = " ✎comm-done" if snap["phase"] == "pre_act" else ""
+        tag += " ★act" if is_act[i] else ""
         tag += " ⟲bdry" if is_boundary[i] else ""
-        labels.append(("reset" if step < 0 else f"step {step}") + tag)
+        labels.append(_step_label(snap) + tag)
 
     fig.update_layout(
         height=1080,
         margin=dict(l=60, r=30, t=90, b=60),
-        title=dict(text=_title(-1, snaps[0], False, False)),
+        title=dict(text=_title(snaps[0], False, False)),
     )
     F.attach_slider(fig, frames, labels, slider_prefix="")
     return F.write(fig, "viz_stacked")
