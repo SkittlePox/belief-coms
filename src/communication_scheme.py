@@ -134,27 +134,21 @@ def simple_communication_scheme_fn(
 
 # Convenience CommunicationSchemeFns: each accepts an iteration (like RouteFn) and
 # returns a scheme, so they can be passed wherever a CommunicationSchemeFn is
-# expected. The constant ones ignore the iteration.
-def a_to_b_scheme_fn(iteration: chex.Numeric) -> CommunicationScheme:
-    """A->B at every iteration (the iteration is ignored)."""
-    return a_to_b()
+# expected.
+def constant_scheme_fn(scheme: CommunicationScheme) -> CommunicationSchemeFn:
+    """Return a CommunicationSchemeFn that yields ``scheme`` at every iteration."""
+    return lambda iteration: scheme
 
 
-def a_to_b_thrice_scheme_fn(iteration: chex.Numeric) -> CommunicationScheme:
-    """A->B three times at every iteration (the iteration is ignored)."""
-    return a_to_b_thrice()
+# Constant schemes: the same scheme at every iteration (the iteration is ignored).
+a_to_b_scheme_fn = constant_scheme_fn(a_to_b())
+b_to_a_scheme_fn = constant_scheme_fn(b_to_a())
+a_to_b_thrice_scheme_fn = constant_scheme_fn(a_to_b_thrice())
+both_speak_scheme_fn = constant_scheme_fn(both_speak())
 
-
-def both_speak_scheme_fn(iteration: chex.Numeric) -> CommunicationScheme:
-    """A->B & B->A at every iteration (the iteration is ignored)."""
-    return both_speak()
-
-
-def alternating_a_to_b_and_b_to_a_scheme_fn(iteration: chex.Numeric) -> CommunicationScheme:
-    """Alternate A->B (even iterations) and B->A (odd iterations).
-
-    Just the phase cycler over ``[a_to_b, b_to_a]``."""
-    return simple_communication_scheme_fn([a_to_b(), b_to_a()])(iteration)
+# Alternate A->B (even iterations) and B->A (odd iterations): the phase cycler over
+# ``[a_to_b, b_to_a]``, built once rather than rebuilt on every call.
+alternating_a_to_b_and_b_to_a_scheme_fn = simple_communication_scheme_fn([a_to_b(), b_to_a()])
 
 
 if __name__ == "__main__":

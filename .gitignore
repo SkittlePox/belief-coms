@@ -11,3 +11,5 @@ wheels/
 
 # Generated visualization HTML
 src/useful_visualizations/renders/
+
+.DS_Store

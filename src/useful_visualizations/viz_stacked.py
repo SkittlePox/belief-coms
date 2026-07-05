@@ -2,8 +2,9 @@
 temporal trace of ``step_env``.
 
 We assemble the env exactly like ``stacked_signification_decpomdp.py``'s ``__main__``
-(guessing game, ``a_to_b_thrice`` so the round cursor visibly walks 0,0,1,1,2,2, and a
-2-step episode horizon so a boundary appears), then drive ``step_env`` with the same
+(guessing game, ``b_to_a`` -- a single round per block, so B speaks then an act lands
+every two steps -- and a 2-step episode horizon so boundaries appear), then drive
+``step_env`` with the same
 scripted stand-in inputs that harness uses -- agents are not learned here; this is
 inspection. Each returned ``StackedSignificationState`` becomes one slider frame.
 
@@ -18,7 +19,9 @@ The dashboard decodes, per step:
     two [agent, state] probability heatmaps (subject-indexed: "what i believes" vs
     "what i's partner thinks i believes"), so belief adoption on belief-stages and
     Bayesian updates on acts are both visible.
-  * Reward -- ``last_agent_rewards`` (zero except on acts).
+  * Act I/O -- ``last_agent_actions`` and ``last_agent_observations`` as [agent x k]
+    one-hot heatmaps (lit only on acts), alongside ``last_agent_rewards`` (zero except
+    on acts).
 """
 
 from __future__ import annotations
@@ -36,22 +39,29 @@ from stacked_signification_decpomdp import (
 from envs.env_assembly import assemble_environments
 from envs.guessing_game import guessing_game_spec
 from routing import simple_routing_fn
-from communication_scheme import a_to_b_thrice_scheme_fn
+from communication_scheme import b_to_a_scheme_fn
 
 from . import _figures as F
 
 NUM_AGENTS = 6
-NUM_STEPS = 12  # two acts (steps 6 & 12); the 2nd act hits the horizon -> a boundary
+NUM_STEPS = 12  # b_to_a: 1 round/block -> an act every 2 steps (6 acts); boundary every 2 acts
 
 # Two-tone discrete scale for roles in the routing panel.
 ROLE_SCALE = [[0.0, F.ACCENT], [0.5, F.ACCENT], [0.5, F.ACCENT_2], [1.0, F.ACCENT_2]]
 # Warm light->orange scale for the "actions taken" panel (distinct from the teal beliefs).
 ACTION_SCALE = [[0.0, "#fff5eb"], [1.0, F.ACCENT_2]]
+# Cool violet scale for the "observations received" panel (distinct from beliefs & actions).
+OBS_SCALE = [[0.0, "#f2eef7"], [1.0, "#8856a7"]]
 
 
 def _action_labels(num_actions):
     """Guessing-game action names: press s0..s{A-2}, then wait."""
     return [f"press s{a}" for a in range(num_actions - 1)] + ["wait"]
+
+
+def _obs_labels(num_obs):
+    """Observation names o=0..o={O-1}."""
+    return [f"o={o}" for o in range(num_obs)]
 
 
 def _build_env():
@@ -63,7 +73,7 @@ def _build_env():
         routing_fn=simple_routing_fn(
             num_agents=NUM_AGENTS, agents_per_game=2, underlying_env_steps_per_episode=2
         ),
-        communication_scheme_fn=a_to_b_thrice_scheme_fn,
+        communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
     )
@@ -72,7 +82,8 @@ def _build_env():
 
 def _rollout(env):
     """Drive NUM_STEPS step_env calls with scripted inputs; return per-step snapshots."""
-    # reset / step_env now return (state, observations); we read the state.
+    # reset returns (state, observations); step_env returns (state, observations,
+    # rewards). We read everything we plot off the state, so we drop obs and rewards.
     state, _obs = env.reset(jax.random.key(0))
     num_states = int(state.true_agent_belief_states.shape[-1])
 
@@ -86,7 +97,7 @@ def _rollout(env):
 
     snaps = [_snapshot(state)]
     for t in range(NUM_STEPS):
-        state, _obs = env.step_env(jax.random.key(t), state, utt, other_est, valid_belief)
+        state, _obs, _rewards = env.step_env(jax.random.key(t), state, utt, other_est, valid_belief)
         snaps.append(_snapshot(state))
     return snaps
 
@@ -98,7 +109,7 @@ def _snapshot(state):
         agent_role=np.asarray(state.agent_role_assignment),
         game_states=np.asarray(state.game_states),
         stage=int(state.communicative_round_stage),
-        round_cursor=int(state.underlying_communication_round_iterator),
+        round_cursor=int(state.communication_round_iterator),
         total_rounds=int(state.active_total_num_rounds),
         env_iter=int(state.underlying_env_iteration),
         cum_env=int(state.cumulative_env_iteration),
@@ -108,6 +119,7 @@ def _snapshot(state):
         est_beliefs=np.asarray(state.estimated_agent_belief_states),
         rewards=np.asarray(state.last_agent_rewards),
         actions=np.asarray(state.last_agent_actions),  # -1 on non-act steps
+        observations=np.asarray(state.last_agent_observations),  # -1 on non-act steps
     )
 
 
@@ -129,7 +141,17 @@ def _actions_matrix(snap, num_actions):
     return m
 
 
-def _traces(snap, num_games, num_states, num_actions):
+def _obs_matrix(snap, num_obs):
+    """[agent, obs] one-hot at the observation each agent drew; all-zero where -1 (no act)."""
+    m = np.zeros((NUM_AGENTS, num_obs))
+    for a in range(NUM_AGENTS):
+        o = int(snap["observations"][a])
+        if o >= 0:
+            m[a, o] = 1.0
+    return m
+
+
+def _traces(snap, num_games, num_states, num_actions, num_obs):
     """The seven animatable traces, in a fixed order (matches the subplot cells)."""
     agent_labels = [f"agent {i}" for i in range(NUM_AGENTS)]
     game_labels = [f"game {g}" for g in range(num_games)]
@@ -176,7 +198,17 @@ def _traces(snap, num_games, num_states, num_actions):
         text=[f"{r:+.2f}" for r in snap["rewards"]], textposition="outside", cliponaxis=False,
         hovertemplate="%{x}: %{y:+.3f}<extra></extra>",
     )
-    return [routing, world, counters, true_b, est_b, actions, rewards]
+    obs_m = _obs_matrix(snap, num_obs)
+    obs_labels = _obs_labels(num_obs)
+    observations = go.Heatmap(
+        z=obs_m, x=obs_labels, y=agent_labels,
+        colorscale=OBS_SCALE, zmin=0, zmax=1, showscale=False,
+        text=[[obs_labels[j] if obs_m[i, j] > 0 else "" for j in range(num_obs)]
+              for i in range(NUM_AGENTS)],
+        texttemplate="%{text}", textfont=dict(size=10),
+        hovertemplate="%{y} saw %{x}<extra></extra>",
+    )
+    return [routing, world, counters, true_b, est_b, actions, rewards, observations]
 
 
 def _title(step, snap, is_act, is_boundary):
@@ -201,6 +233,7 @@ def render() -> str:
     num_games = NUM_AGENTS // 2
     num_states = snaps[0]["true_beliefs"].shape[-1]
     num_actions = int(env.all_env_parameters.transition.shape[2])  # padded action count
+    num_obs = int(env.all_env_parameters.observation.shape[-1])  # per-agent observation count
 
     # Per-step flags inferred from consecutive snapshots.
     is_act = [False] + [snaps[i]["cum_env"] > snaps[i - 1]["cum_env"] for i in range(1, len(snaps))]
@@ -210,7 +243,7 @@ def render() -> str:
         rows=3, cols=3,
         specs=[[{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
                [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
-               [{"colspan": 3, "type": "xy"}, None, None]],
+               [{"colspan": 2, "type": "xy"}, None, {"type": "xy"}]],
         row_heights=[0.30, 0.44, 0.26], vertical_spacing=0.11, horizontal_spacing=0.08,
         subplot_titles=(
             "routing — agents ▸ (game, role)",
@@ -220,16 +253,17 @@ def render() -> str:
             "estimated beliefs  (estimate ABOUT agent i)",
             "actions taken  [agent × action]  (lit only on ACT steps)",
             "last agent rewards  (nonzero only on acts)",
+            "observations received  [agent × obs]  (lit only on ACT steps)",
         ),
     )
 
-    base = _traces(snaps[0], num_games, num_states, num_actions)
-    positions = [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1)]
+    base = _traces(snaps[0], num_games, num_states, num_actions, num_obs)
+    positions = [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 3)]
     for trace, (r, c) in zip(base, positions):
         fig.add_trace(trace, row=r, col=c)
 
     # Grids read top-down (agent 0 on top); bar axes get sensible ranges.
-    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3)]:
+    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3), (3, 3)]:
         fig.update_yaxes(autorange="reversed", row=r, col=c)
     # Headroom so the outside value labels on the bars don't clip.
     counter_max = max(
@@ -244,8 +278,8 @@ def render() -> str:
         frames.append(
             go.Frame(
                 name=str(i),
-                data=_traces(snap, num_games, num_states, num_actions),
-                traces=[0, 1, 2, 3, 4, 5, 6],
+                data=_traces(snap, num_games, num_states, num_actions, num_obs),
+                traces=[0, 1, 2, 3, 4, 5, 6, 7],
                 layout=go.Layout(title=dict(text=_title(step, snap, is_act[i], is_boundary[i]))),
             )
         )
