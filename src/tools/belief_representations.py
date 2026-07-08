@@ -255,7 +255,12 @@ class CategoricalBeliefState:
 
             all_obs = jnp.arange(self.num_unique_observations)
             weights = jax.vmap(weight_of_obs)(all_obs)          # (O,)
-            all_probs = jax.vmap(updated_bj_under_obs)(all_obs) # (O, S)
+            # Zero out non-finite rows before the weighted sum. Some hypothetical o_other are
+            # impossible given the current belief (e.g. the deterministic "done" symbol from a
+            # non-terminal belief), so their per-obs update is a 0/0 -> NaN. Their weight is
+            # correctly 0, but 0 * NaN = NaN would poison the einsum below and NaN the whole
+            # estimate. nan_to_num sends those rows to 0, and a 0-weight * 0 contributes nothing.
+            all_probs = jnp.nan_to_num(jax.vmap(updated_bj_under_obs)(all_obs))  # (O, S)
 
             # weighted average of updated beliefs over o_other
             return jnp.einsum('o,os->s', weights, all_probs) * other_action_dist.prob(other_action)

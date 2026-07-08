@@ -51,7 +51,11 @@ O = _PARAMS.observation.shape[-1]
 _PRIOR = np.asarray(_PARAMS.initial_belief_states[0])  # uniform over non-terminal states
 
 STATE_LABELS = [f"s={s}" for s in range(S)]
-OBS_OPTIONS = [{"label": f"o={o}", "value": o} for o in range(O)]
+# The last observation symbol is the dedicated "done" signal, emitted only in the
+# terminal state (see guessing_game.build_observation_tensor).
+DONE_OBS = O - 1
+OBS_LABELS = [f"o={o}" for o in range(O - 1)] + [f"o={DONE_OBS} (done)"]
+OBS_OPTIONS = [{"label": OBS_LABELS[o], "value": o} for o in range(O)]
 ACTION_LABELS = [f"press s{a}" for a in range(A - 1)] + ["wait"]
 ACTION_OPTIONS = [{"label": lab, "value": a} for a, lab in enumerate(ACTION_LABELS)]
 
@@ -87,38 +91,75 @@ def initial_store():
         "true0": [_PRIOR.tolist()], "est0": [_PRIOR.tolist()],
         "true1": [_PRIOR.tolist()], "est1": [_PRIOR.tolist()],
         "steps": [],  # list of {"o0","o1","a0","a1"}
+        "note": "",   # last-action message (e.g. a rejected impossible observation)
     }
 
 
+def _degenerate(*prob_arrays):
+    """True if any posterior failed to normalize -- an impossible (zero-probability) obs.
+
+    The engine returns a normalized categorical when the evidence has support; when the
+    observation is impossible given the belief (0/0) the probs come back NaN / all-zero.
+    """
+    for p in prob_arrays:
+        p = np.asarray(p, dtype=float)
+        if not np.all(np.isfinite(p)) or abs(p.sum() - 1.0) > 1e-6:
+            return True
+    return False
+
+
 def apply_step(store, o0, a0, o1, a1):
-    """Append one engine-computed JOINT step: advance both agents from their own (o, a)."""
+    """Append one engine-computed JOINT step: advance both agents from their own (o, a).
+
+    If either agent's update is degenerate (the observation is impossible given that
+    agent's current belief), the whole step is REJECTED -- nothing is appended (so the two
+    agents' trajectories stay row-aligned) and ``note`` explains which agent was at fault.
+    """
     nt0, ne0 = step_belief(0, store["true0"][-1], store["est0"][-1], o0, a0)
     nt1, ne1 = step_belief(1, store["true1"][-1], store["est1"][-1], o1, a1)
+
+    bad = [i for i, ps in ((0, (nt0, ne0)), (1, (nt1, ne1))) if _degenerate(*ps)]
+    if bad:
+        who = " and ".join(f"agent {i}" for i in bad)
+        return {**store, "note": (
+            f"⚠ step rejected: {who} received an impossible observation given its current "
+            f"belief (o0={_obs_str(o0)} after a0={ACTION_LABELS[a0]}, "
+            f"o1={_obs_str(o1)} after a1={ACTION_LABELS[a1]}). "
+            f"The 'done' symbol is only reachable via the button that transitions into the "
+            f"done state."
+        )}
+
     return {
         "true0": store["true0"] + [nt0.tolist()], "est0": store["est0"] + [ne0.tolist()],
         "true1": store["true1"] + [nt1.tolist()], "est1": store["est1"] + [ne1.tolist()],
         "steps": store["steps"] + [{"o0": int(o0), "a0": int(a0),
                                     "o1": int(o1), "a1": int(a1)}],
+        "note": "",
     }
 
 
 def undo(store):
     """Pop the last step (no-op at the initial prior)."""
     if not store["steps"]:
-        return store
+        return {**store, "note": ""}
     return {
         "true0": store["true0"][:-1], "est0": store["est0"][:-1],
         "true1": store["true1"][:-1], "est1": store["est1"][:-1],
         "steps": store["steps"][:-1],
+        "note": "",
     }
+
+
+def _obs_str(o):
+    return "done" if o == DONE_OBS else str(o)
 
 
 def _row_labels(store):
     labels = ["start (prior)"]
     for i, s in enumerate(store["steps"]):
         labels.append(
-            f"t{i}: a0={ACTION_LABELS[s['a0']]}, o0={s['o0']} | "
-            f"a1={ACTION_LABELS[s['a1']]}, o1={s['o1']}"
+            f"t{i}: a0={ACTION_LABELS[s['a0']]}, o0={_obs_str(s['o0'])} | "
+            f"a1={ACTION_LABELS[s['a1']]}, o1={_obs_str(s['o1'])}"
         )
     return labels
 
@@ -225,6 +266,7 @@ app.layout = html.Div(
                "action → state transitions → observation."),
         _controls,
         dcc.Store(id="store", data=initial_store()),
+        html.Div(id="banner", style={"minHeight": "0", "margin": "8px 0"}),
         html.H4("agent 0's belief vs how agent 1 models it"),
         _heat_row("true0_heat", "est_of_0_heat"),
         html.H4("agent 1's belief vs how agent 0 models it"),
@@ -260,6 +302,17 @@ def _update_store(_apply, _undo, _reset, o0, a0, o1, a1, store):
     if trigger == "apply":
         return apply_step(store, o0, a0, o1, a1)
     return no_update
+
+
+@app.callback(Output("banner", "children"), Input("store", "data"))
+def _banner(store):
+    note = store.get("note", "")
+    if not note:
+        return None
+    return html.Div(note, style={
+        "padding": "10px 14px", "borderRadius": "6px",
+        "background": "#fff4e5", "border": "1px solid #f0b775", "color": "#8a4b00",
+    })
 
 
 @app.callback(
