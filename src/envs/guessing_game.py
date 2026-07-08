@@ -8,13 +8,15 @@ game types lives in envs/env_assembly.py.
 Q&A
 ---
 Q: Is state 3 (the 4th state) a termination state?
-A: Yes. It's absorbing, gives 0 reward, has uninformative (uniform) observations,
-   and is never an initial state. States 0-2 are the referents; you reach state 3
-   only by pressing the matching button (a0 == s).
+A: Yes. It's absorbing, gives 0 reward, emits a dedicated "done" observation (the
+   last observation symbol), and is never an initial state. States 0-2 are the
+   referents; you reach state 3 only by pressing the matching button (a0 == s).
 
 Q: Is the observation function deterministic?
-A: No, stochastic. In state s each agent sees one of the two symbols != s, 50/50,
-   drawn independently per agent and per step (action-independent).
+A: In the referent states, no: each agent sees one of the two referent symbols != s,
+   50/50, drawn independently per agent and per step (action-independent). In the
+   done state it IS deterministic: both agents see the dedicated done symbol, so a
+   belief update on that observation collapses onto the terminal state.
 
 Q: Can the button-presser learn the true state just by waiting?
 A: Yes. Each observed symbol k rules out state k, so after seeing both non-true
@@ -57,22 +59,27 @@ def build_observation_tensor(num_states, num_actions, num_observations, done_sta
     """O(o0, o1 | s', a0, a1), shape [S, A, A, O, O].
 
     Single shared observation alphabet: both agents draw from the same set of
-    `num_observations` symbols. Each agent independently sees, uniformly, one of
-    the two symbols that are NOT the true state, so the joint is the outer product
-    of the two identical per-agent marginals. Action-independent here, so we
-    broadcast over the action axes. In the done state both marginals are uniform.
+    `num_observations` symbols. The LAST symbol (index num_observations - 1) is a
+    dedicated "done" symbol emitted only in the terminal state; the remaining
+    `num_observations - 1` symbols are the referent symbols. In a non-terminal
+    (referent) state s each agent independently sees, uniformly, one of the referent
+    symbols that are NOT s (so symbol k rules out state k, and the done symbol is
+    never emitted). In the done state both agents deterministically see the done
+    symbol, which signals to belief updating that a terminal state was entered. The
+    joint is the outer product of the two identical per-agent marginals;
+    action-independent here, so we broadcast over the action axes.
     """
     O = np.zeros((num_states, num_actions, num_actions, num_observations, num_observations))
-    base = np.array(
-        [
-            [0.0, 0.5, 0.5],
-            [0.5, 0.0, 0.5],
-            [0.5, 0.5, 0.0],
-        ]
-    )
+    done_symbol = num_observations - 1
+    num_referent_symbols = num_observations - 1   # every symbol except the done symbol
     for s in range(num_states):
-        row = np.ones(num_observations) / num_observations if s == done_state else base[s]
-        O[s, :, :, :, :] = np.outer(row, row)   # independent identical marginals
+        row = np.zeros(num_observations)
+        if s == done_state:
+            row[done_symbol] = 1.0                # deterministic "done" signal
+        else:
+            others = [k for k in range(num_referent_symbols) if k != s]
+            row[others] = 1.0 / len(others)       # uniform over referent symbols != s
+        O[s, :, :, :, :] = np.outer(row, row)     # independent identical marginals
     return jnp.asarray(O)
 
 
@@ -113,7 +120,7 @@ def role_1_optimal_policy(belief: distrax.Categorical) -> distrax.Categorical:
 
 
 def guessing_game_spec(
-    num_states=4, num_actions=4, num_observations=3, num_agents=2, done_state=3
+    num_states=4, num_actions=4, num_observations=4, num_agents=2, done_state=3
 ) -> Tuple[FlexibleEnvParams, Tuple[OptimalPolicy, OptimalPolicy]]:
     """EnvSpec for the guessing game: (FlexibleEnvParams, per-role policies)."""
     # Uniform prior over the non-terminal states; same for the world state and
