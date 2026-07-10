@@ -1,3 +1,4 @@
+import dataclasses
 import jax
 import jax.numpy as jnp
 import chex
@@ -15,69 +16,55 @@ class AgentGameRoleRoute:
     agent_role_assignment: chex.Array      # [num agents], index i represents agent i's assigned role in a game (either 0 or 1)
     underlying_env_steps_per_episode: chex.Array  # scalar int: how many underlying-DecPOMDP steps this episode runs (lockstep across all games; early-terminating games are masked, not re-routed)
 
-# RouteFn is sampled once per episode; `iteration` is the episode index, which is
-# what lets the route prescribe a different episode length (and assignment) over time.
+# RouteFn is sampled once per episode; `iteration` is the episode index.
 RouteFn = Callable[[chex.PRNGKey, int], AgentGameRoleRoute]  # (key, iteration) -> route
+
+# Dyadic games: exactly two agents (two roles) per game.
+AGENTS_PER_GAME = 2
 
 
 def simple_routing_fn(
     num_agents: int = 10,
     game_type_id: int = 0,
-    agents_per_game: int = 2,
-    underlying_env_steps_per_episode: Union[int, Callable[[chex.Numeric], chex.Numeric]] = 10,
+    underlying_env_steps_per_episode: int = 10,
 ) -> RouteFn:
-    """Build a RouteFn that randomly assigns agents to fixed-size games of one type.
+    """Build a RouteFn that randomly assigns agents to two-agent games of one type.
 
-    Every game is of type ``game_type_id`` and holds exactly ``agents_per_game``
-    agents. The agents are randomly partitioned across ``num_agents //
-    agents_per_game`` games, and within each game they are randomly given distinct
-    roles ``0 .. agents_per_game - 1``.
+    Every game is of type ``game_type_id`` and holds two agents. The agents are
+    randomly partitioned across ``num_agents // 2`` games, and within each game they
+    are randomly given distinct roles 0 and 1.
 
-    With ``num_agents=10``, ``agents_per_game=2`` and ``game_type_id=0`` this
-    routes 10 agents into 5 games of id 0, each with one role-0 and one role-1
-    agent.
+    With ``num_agents=10`` and ``game_type_id=0`` this routes 10 agents into 5 games
+    of id 0, each with one role-0 and one role-1 agent.
 
     The returned RouteFn takes ``(key, iteration)``, where ``iteration`` is the
-    episode index. This simple router does not let the *assignment* depend on the
-    iteration (it re-randomizes purely from ``key``), but the iteration drives the
-    ``underlying_env_steps_per_episode`` schedule, so the episode length can be
-    prescribed over time.
+    episode index. This simple router does not let the assignment depend on the
+    iteration; it re-randomizes purely from ``key``.
 
     Args:
         num_agents: Total number of agents to route.
         game_type_id: The game-type index assigned to every game.
-        agents_per_game: Number of (distinct) roles / agents per game.
-        underlying_env_steps_per_episode: How many underlying-DecPOMDP steps each
-            episode runs. Either a constant int (same length every episode) or a
-            callable ``iteration -> length`` (a schedule, e.g. a curriculum that
-            lengthens episodes over training). May return a traced value; it is cast
-            to an int32 scalar in the route.
+        underlying_env_steps_per_episode: Constant number of underlying-DecPOMDP steps
+            each episode runs.
 
     Returns:
         A ``RouteFn`` mapping (key, iteration) -> AgentGameRoleRoute.
     """
 
-    # Normalize a constant int into a (trivial) schedule so `route` has one path.
-    steps_per_episode_fn = (
-        underlying_env_steps_per_episode
-        if callable(underlying_env_steps_per_episode)
-        else (lambda iteration: underlying_env_steps_per_episode)
-    )
-
     def route(key: chex.PRNGKey, iteration: int) -> AgentGameRoleRoute:
-        num_games = num_agents // agents_per_game
+        num_games = num_agents // AGENTS_PER_GAME
 
         # Every game shares the same game type.
         game_set = jnp.full((num_games,), game_type_id, dtype=jnp.int32)
 
         # Lay out the agents into ordered (game, role) slots:
-        #   slot s -> game (s // agents_per_game), role (s % agents_per_game)
+        #   slot s -> game (s // AGENTS_PER_GAME), role (s % AGENTS_PER_GAME)
         # so the slots already contain each game exactly once per role. We then
         # shuffle *which agent occupies which slot* to randomize assignments,
         # which keeps every game balanced (one agent of each role) by construction.
         slots = jnp.arange(num_agents)
-        game_per_slot = slots // agents_per_game
-        role_per_slot = slots % agents_per_game
+        game_per_slot = slots // AGENTS_PER_GAME
+        role_per_slot = slots % AGENTS_PER_GAME
 
         agent_for_slot = jax.random.permutation(key, num_agents)  # slot -> agent id
 
@@ -93,18 +80,106 @@ def simple_routing_fn(
             agent_game_assignment=agent_game_assignment,
             agent_role_assignment=agent_role_assignment,
             underlying_env_steps_per_episode=jnp.asarray(
-                steps_per_episode_fn(iteration), dtype=jnp.int32
+                underlying_env_steps_per_episode, dtype=jnp.int32
             ),
         )
 
     return route
 
 
+def fixed_pairs_routing_fn(
+    num_agents: int = 10,
+    underlying_env_steps_per_episode: int = 10,
+) -> RouteFn:
+    """Build a RouteFn with a fixed, iteration-independent assignment.
+
+    Agents are partitioned into consecutive pairs: agent i is placed in game
+    ``i // 2`` with role ``i % 2`` -- games (0,1), (2,3), ... Unlike
+    ``simple_routing_fn``, the assignment never re-randomizes -- the same agents play
+    the same roles in the same games every episode, regardless of ``key`` or
+    ``iteration``. Every game is game type 0, so unlike simple_routing_fn there is no
+    ``game_type_id`` knob.
+
+    Args:
+        num_agents: Total number of agents to route.
+        underlying_env_steps_per_episode: Constant number of underlying-DecPOMDP steps
+            per episode (no schedule -- the whole route is fixed across iterations).
+
+    Returns:
+        A ``RouteFn`` that returns the same AgentGameRoleRoute for every (key, iteration).
+    """
+    num_games = num_agents // AGENTS_PER_GAME
+
+    # The assignment is fully determined by the args, so build it once and close over
+    # it; `route` ignores key and iteration entirely.
+    slots = jnp.arange(num_agents)
+    fixed_route = AgentGameRoleRoute(
+        game_set=jnp.zeros((num_games,), dtype=jnp.int32),               # all game type 0
+        agent_game_assignment=(slots // AGENTS_PER_GAME).astype(jnp.int32),
+        agent_role_assignment=(slots % AGENTS_PER_GAME).astype(jnp.int32),
+        underlying_env_steps_per_episode=jnp.asarray(
+            underlying_env_steps_per_episode, dtype=jnp.int32
+        ),
+    )
+
+    def route(key: chex.PRNGKey, iteration: int) -> AgentGameRoleRoute:
+        return fixed_route
+
+    return route
+
+
+# --- Routing configs ---------------------------------------------------------
+# One config dataclass per routing family, each colocated with the builder it wraps
+# and exposing ``build() -> RouteFn``. ``RoutingConfig`` is the union of all families;
+# training.config nests it in ExperimentConfig and tyro renders a 2+-member union as
+# subcommands (pick one family at the CLI). To add a family: write its builder above,
+# add a frozen *RoutingConfig dataclass with build() here, and extend the union.
+
+
+@dataclasses.dataclass(frozen=True)
+class SimpleRoutingConfig:
+    """Randomly assign agents to fixed-size games of a single type (simple_routing_fn)."""
+
+    num_agents: int = 10
+    game_type_id: int = 0
+    underlying_env_steps_per_episode: int = 10
+
+    def build(self) -> RouteFn:
+        return simple_routing_fn(
+            num_agents=self.num_agents,
+            game_type_id=self.game_type_id,
+            underlying_env_steps_per_episode=self.underlying_env_steps_per_episode,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class FixedPairsRoutingConfig:
+    """Fixed consecutive agent pairings, identical every episode (fixed_pairs_routing_fn).
+
+    Carries no ``game_type_id`` (every game is type 0) -- an illustration that routing
+    families need not share a parameter set.
+    """
+
+    num_agents: int = 10
+    underlying_env_steps_per_episode: int = 10
+
+    def build(self) -> RouteFn:
+        return fixed_pairs_routing_fn(
+            num_agents=self.num_agents,
+            underlying_env_steps_per_episode=self.underlying_env_steps_per_episode,
+        )
+
+
+# Union over routing families. Every member must expose ``build() -> RouteFn``; tyro
+# renders a 2+-member union as CLI subcommands (pick one family).
+RoutingConfig = Union[SimpleRoutingConfig, FixedPairsRoutingConfig]
+
+
 if __name__ == "__main__":
     key = jax.random.key(0)
 
     route_fn = simple_routing_fn(
-        num_agents=10, game_type_id=0, agents_per_game=2, underlying_env_steps_per_episode=7
+        num_agents=10, game_type_id=0, underlying_env_steps_per_episode=7
     )
     route = route_fn(key, iteration=0)
 
@@ -113,18 +188,6 @@ if __name__ == "__main__":
     print("agent_role_assignment: ", route.agent_role_assignment)
     print("env steps per episode: ", route.underlying_env_steps_per_episode)
     assert route.underlying_env_steps_per_episode == 7, "constant length returned verbatim"
-
-    # Scheduled length: episodes grow with the episode index (a simple curriculum).
-    sched_fn = simple_routing_fn(
-        num_agents=10,
-        agents_per_game=2,
-        underlying_env_steps_per_episode=lambda iteration: 5 + 2 * iteration,
-    )
-    lengths = [
-        int(sched_fn(key, iteration=it).underlying_env_steps_per_episode) for it in range(4)
-    ]
-    print("scheduled lengths:     ", lengths)
-    assert lengths == [5, 7, 9, 11], "episode-length schedule should track the episode index"
 
     # Sanity checks: every game holds exactly one agent of each role.
     for game in range(route.game_set.shape[0]):

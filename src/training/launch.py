@@ -10,17 +10,29 @@ import wandb
 import dataclasses
 import tyro
 import jax
-from training.config import ExperimentConfig, WandbConfig
+from training.config import ExperimentConfig
 from training.ippo import make_train
+
+
+# WandbConfig lives here, not in config.py: only main() consumes it (wandb.init), so
+# it's a launcher concern rather than part of the launch<->ippo shared contract.
+@dataclasses.dataclass(frozen=True)
+class WandbConfig:
+    """wandb config"""
+
+    entity: str = "signification-team"
+    project: str = "belief-coms"
+    mode: str = "disabled"
+    notes: str = ""
+    save_code: bool = True
+
 
 _DEFAULT_WANDB_CONFIG = WandbConfig()
 
 
 def main(
     experiment_config: Annotated[ExperimentConfig, tyro.conf.OmitArgPrefixes],
-    wandb_config: Annotated[
-        WandbConfig, tyro.conf.arg(name="wandb")
-    ] = _DEFAULT_WANDB_CONFIG,
+    wandb_config: Annotated[WandbConfig, tyro.conf.arg(name="wandb")] = _DEFAULT_WANDB_CONFIG,
 ):
     run = wandb.init(
         entity=wandb_config.entity,

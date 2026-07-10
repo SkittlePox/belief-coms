@@ -71,7 +71,7 @@ def _build_env():
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
         routing_fn=simple_routing_fn(
-            num_agents=NUM_AGENTS, agents_per_game=2, underlying_env_steps_per_episode=4
+            num_agents=NUM_AGENTS, underlying_env_steps_per_episode=4
         ),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
