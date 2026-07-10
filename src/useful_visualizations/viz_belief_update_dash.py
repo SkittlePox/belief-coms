@@ -20,7 +20,7 @@ sanity checks -- does each agent's estimate of its partner track the partner's r
 plus grouped bars for the latest step. Undo pops the last step; Reset re-initializes both
 agents to the game's prior.
 
-Run:  PYTHONPATH=. uv run python -m useful_visualizations.viz_belief_update_dash
+Run:  uv run python -m useful_visualizations.viz_belief_update_dash
 then open http://127.0.0.1:8050  (set PORT / HOST env vars to override).
 
 The heavy lifting lives in pure functions (``initial_store``, ``apply_step``, ``undo``,

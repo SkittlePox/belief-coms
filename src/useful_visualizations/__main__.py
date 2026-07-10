@@ -1,6 +1,6 @@
 """Render every visualization in one shot.
 
-    PYTHONPATH=. uv run python -m useful_visualizations
+    uv run python -m useful_visualizations
 """
 
 from __future__ import annotations

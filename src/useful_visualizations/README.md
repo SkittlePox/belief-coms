@@ -14,12 +14,12 @@ From `src/`:
 
 ```bash
 # all three
-PYTHONPATH=. uv run python -m useful_visualizations
+uv run python -m useful_visualizations
 
 # or one at a time
-PYTHONPATH=. uv run python -m useful_visualizations.viz_distributions
-PYTHONPATH=. uv run python -m useful_visualizations.viz_guessing_game
-PYTHONPATH=. uv run python -m useful_visualizations.viz_stacked
+uv run python -m useful_visualizations.viz_distributions
+uv run python -m useful_visualizations.viz_guessing_game
+uv run python -m useful_visualizations.viz_stacked
 ```
 
 ## The views

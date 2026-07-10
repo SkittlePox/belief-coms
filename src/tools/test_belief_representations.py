@@ -2,11 +2,11 @@
 
 Run either directly (matches this repo's ``python -m`` convention)::
 
-    PYTHONPATH=. uv run python -m tools.test_belief_representations
+    uv run python -m tools.test_belief_representations
 
 or under pytest::
 
-    PYTHONPATH=. uv run pytest src/tools/test_belief_representations.py
+    uv run pytest src/tools/test_belief_representations.py
 """
 
 import distrax

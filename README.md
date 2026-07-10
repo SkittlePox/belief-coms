@@ -28,26 +28,46 @@ Hmm okay this is very interesting. If everything is a guessing game it makes the
 
 I think this is the end of stacked_signification_decpomdp.py. I'll need to build visualizations to double-check it works as expected.
 
-# Running
+# Installation
 
-The project is **not installed as a package**. The code uses fully-qualified
-imports (`envs.*`, `tools.*`) rooted at `src/`, so run modules from inside `src/`
-with `src/` on the path:
+The project is packaged so it can be installed as an **editable** package with
+[uv](https://docs.astral.sh/uv/). From the repo root:
 
 ```bash
-cd src
-PYTHONPATH=. uv run python -m tools.returns
+uv sync
+```
+
+This creates the `.venv`, installs all dependencies, and installs `belief-coms`
+itself in editable mode — the `src/` packages (`envs`, `tools`, `training`, …)
+become importable from anywhere, with source changes picked up immediately (no
+reinstall needed). No `PYTHONPATH` required.
+
+If you add a new top-level package under `src/`, add it to
+`[tool.hatch.build.targets.wheel] packages` in `pyproject.toml` and re-run
+`uv sync`.
+
+# Running
+
+The project is installed as an **editable package** (`uv sync`), so the
+top-level packages (`envs.*`, `tools.*`, `training.*`, …) are importable from
+anywhere — no `PYTHONPATH` needed. Run modules by dotted path from any directory:
+
+```bash
+uv run python -m tools.returns
 ```
 
 Use the dotted module path (`-m tools.returns`), not a file path. Running a file
 directly (e.g. `uv run tools/returns.py`) only puts that file's folder on
-`sys.path`, not `src/`, so imports like `import envs` fail with
-`ModuleNotFoundError`. `PYTHONPATH=.` adds `src/` (the cwd) to the path.
+`sys.path`, which breaks sibling imports like `import envs`.
+
+If you add a new top-level package under `src/`, add it to
+`[tool.hatch.build.targets.wheel] packages` in `pyproject.toml` and re-run
+`uv sync`.
 
 Other entry points follow the same pattern, e.g.:
 
 ```bash
-PYTHONPATH=. uv run python -m envs.guessing_game
-PYTHONPATH=. uv run python -m envs.env_assembly
-PYTHONPATH=. uv run python -m communication.stacked_signification_decpomdp
+uv run python -m envs.guessing_game
+uv run python -m envs.env_assembly
+uv run python -m communication.stacked_signification_decpomdp
 ```
