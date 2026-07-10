@@ -4,8 +4,8 @@ import distrax
 from flax import struct
 from typing import Any, Callable, Sequence
 from functools import partial
-from training.routing import RouteFn
-from training.communication_scheme import CommunicationSchemeFn
+from communication.routing import RouteFn
+from communication.communication_scheme import CommunicationSchemeFn
 
 # FlexibleEnvParams / OptimalPolicy are defined in envs.flexible_env (the leaf of
 # the env-definition dependency graph) and consumed here.
@@ -944,8 +944,8 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     prints the schedule as it advances so the stage / round / env-iteration cadence is
     visible. Returns ``(env, final_state)``.
     """
-    from training.routing import simple_routing_fn
-    from training.communication_scheme import a_to_b_thrice_scheme_fn
+    from communication.routing import simple_routing_fn
+    from communication.communication_scheme import a_to_b_thrice_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
     stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
@@ -994,8 +994,8 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
 if __name__ == "__main__":
     a_to_b_thrice_example(jax.random.key(0))
 
-    from training.routing import simple_routing_fn
-    from training.communication_scheme import b_to_a_scheme_fn
+    from communication.routing import simple_routing_fn
+    from communication.communication_scheme import b_to_a_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
     # Build the stacked params + policy table from one game type (the guessing game).
@@ -1068,7 +1068,7 @@ if __name__ == "__main__":
     # step_env bit 3: scheduling state machine. Use a 3-round block (a_to_b_thrice) so
     # the round cursor visibly walks 0,0,1,1,2,2 (two stages each) and the env iteration
     # advances exactly once per completed block (every 6 step_env calls).
-    from training.communication_scheme import a_to_b_thrice_scheme_fn
+    from communication.communication_scheme import a_to_b_thrice_scheme_fn
 
     sched_env = StackedSignificationDecPOMDP(
         num_agents=10,

@@ -32,14 +32,14 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from training.stacked_signification_decpomdp import (
+from communication.stacked_signification_decpomdp import (
     StackedSignificationDecPOMDP,
     UTTERANCE_STAGE,
 )
 from envs.env_assembly import assemble_environments
 from envs.guessing_game import guessing_game_spec
-from training.routing import simple_routing_fn
-from training.communication_scheme import b_to_a_scheme_fn
+from communication.routing import simple_routing_fn
+from communication.communication_scheme import b_to_a_scheme_fn
 
 from . import _figures as F
 

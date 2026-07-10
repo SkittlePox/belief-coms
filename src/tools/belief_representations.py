@@ -5,7 +5,6 @@ import jax.numpy as jnp
 from functools import partial
 from .distributions import *
 
-
 class CategoricalBeliefState:
     """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution.
 
@@ -178,6 +177,7 @@ class CategoricalBeliefState:
         probs = jax.vmap(state_likelihood)(jnp.arange(self.num_unique_states))
         return distrax.Categorical(probs=probs)
 
+    # NOTE: This does not work as expected. We need to migrate this to a memo model.
     def update_other_belief_estimate_with_observation_only(
         self,
         other_belief_distribution_estimate: distrax.Categorical,
