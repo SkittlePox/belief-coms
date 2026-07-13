@@ -45,9 +45,9 @@ def main(
     print(experiment_config, wandb_config)
 
     # Execute training code in here
-    rng = jax.random.PRNGKey(experiment_config.seed)
-    train = make_train(experiment_config)
-    results = train(rng)
+    # rng = jax.random.PRNGKey(experiment_config.seed)
+    # train = make_train(experiment_config)
+    # results = train(rng)
 
     run.finish()
 

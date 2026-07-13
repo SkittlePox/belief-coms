@@ -177,95 +177,356 @@ class CategoricalBeliefState:
         probs = jax.vmap(state_likelihood)(jnp.arange(self.num_unique_states))
         return distrax.Categorical(probs=probs)
 
-    # NOTE: This does not work as expected. We need to migrate this to a memo model.
+    def initial_belief(
+        self,
+        ego_observation,
+        agent_id = 0,       # This is the ego agent's id!
+        reset_action = 0,
+    ):
+        """The ego agent's own belief at t=0, from the reset observation.
+
+            b_0(s) ∝ P0(s) · O_ego(o_0 | s, reset_action)
+
+        There is no action before the reset observation, so the other update methods do
+        not apply: passing a placeholder joint action to
+        ``update_with_observation_and_joint_action`` would silently run a TRANSITION as
+        well, i.e. treat the placeholder as an action really taken. In the guessing game
+        that means "agent 0 pressed button 0", which quietly corrupts the belief from the
+        first step. Use this at reset instead.
+
+        `reset_action` must match what the environment queries the observation tensor with
+        at reset (FlexibleEnv.get_obs uses 0).
+        """
+        states = jnp.arange(self.num_unique_states)
+        joint_action = (reset_action, reset_action)
+
+        def state_likelihood(state):
+            joint_obs = self.joint_observation_function(state, joint_action)
+            marginal_obs = jax.lax.cond(
+                agent_id == 0,
+                lambda _: self.joint_factory.marginalize_var2(joint_obs),
+                lambda _: self.joint_factory.marginalize_var1(joint_obs),
+                None,
+            )
+            return (marginal_obs.prob(ego_observation)
+                    * self.env_params.initial_state_distribution[state])
+
+        probs = jax.vmap(state_likelihood)(states)
+        return distrax.Categorical(probs=probs / jnp.sum(probs))
+
+    def initial_other_belief_estimate(
+        self,
+        ego_observation,
+        agent_id = 0,       # This is the ego agent's id!
+        reset_action = 0,
+    ):
+        """The ego's estimate of the other agent's belief at t=0, from the reset observation.
+
+        The reset observation has no action before it, so it cannot be fed to
+        update_other_belief_estimate_with_observation_only -- but it is still informative
+        about the other agent, because the two agents' observations are correlated through
+        the state. Dropping it (starting the estimate at the prior and only updating from
+        t=1) throws away a real step of evidence.
+
+        Same shape as the main update, with the transition removed: weight each hypothetical
+        o_other by how well it explains the o_ego we actually got, and mix the posteriors it
+        would induce.
+
+            b̄_0(s) = ∑_{o_other} w(o_other) · b_{o_other}(s)
+            w(o_other) ∝ ∑_s P0(s) · O(o_ego, o_other | s, reset_action)
+            b_{o_other}(s) ∝ P0(s) · O_other(o_other | s, reset_action)
+
+        `reset_action` is the no-op joint action the environment queries the observation
+        tensor with at reset (FlexibleEnv.get_obs uses 0).
+        """
+        states = jnp.arange(self.num_unique_states)
+        prior = self.env_params.initial_state_distribution
+        joint_action = (reset_action, reset_action)
+
+        def observation_rows(state):
+            joint_obs = self.joint_observation_function(state, joint_action)
+            grid = joint_obs.probs.reshape(
+                self.num_unique_observations, self.num_unique_observations
+            )
+            joint_with_ego = jax.lax.cond(
+                agent_id == 0,
+                lambda _: grid[ego_observation, :],
+                lambda _: grid[:, ego_observation],
+                None,
+            )
+            other_marginal = jax.lax.cond(
+                agent_id == 0,
+                lambda _: self.joint_factory.marginalize_var1(joint_obs).probs,
+                lambda _: self.joint_factory.marginalize_var2(joint_obs).probs,
+                None,
+            )
+            return joint_with_ego, other_marginal
+
+        joint_with_ego, other_marginal = jax.vmap(observation_rows)(states)   # (S, O) each
+
+        weights = prior @ joint_with_ego                                      # (O,)
+
+        posteriors = (prior[:, None] * other_marginal).T                      # (O, S)
+        mass = jnp.sum(posteriors, axis=1, keepdims=True)
+        posteriors = posteriors / jnp.where(mass > 0, mass, 1.0)
+
+        unnormalized = weights @ posteriors                                   # (S,)
+        total = jnp.sum(unnormalized)
+        probs = jnp.where(total > 0, unnormalized / jnp.where(total > 0, total, 1.0), prior)
+        return distrax.Categorical(probs=probs)
+
     def update_other_belief_estimate_with_observation_only(
         self,
         other_belief_distribution_estimate: distrax.Categorical,
         ego_observation,
         previous_ego_action,
         other_optimal_policy,
-        agent_id = 0    # This is the ego agent's id!
+        agent_id = 0,   # This is the ego agent's id!
+        ego_belief_distribution: distrax.Categorical = None,
+        ego_action_prior = None,
+        mode = "mixture",
     ):
-        """Update the ego agent's estimate of the other agent's belief state.
+        """Update the ego agent's *mean-belief estimate* of the other agent's belief.
 
-        The ego agent cannot observe o_other directly, so it marginalizes over all
-        possible other-agent observations, weighting each by its likelihood conditioned
-        on the ego agent's own observation. For each hypothetical o_other, a full belief
-        update is run from the other agent's perspective, and the results are averaged:
+        An in-place, history-free, deliberately approximate update. It maps
 
-            b̄'(s') = ∑_{a_other} π*(b̄)(a_other) · ∑_{o_other} P(o_other | o_ego, a) · b̄_updated(s' | o_other, a)
+            (b̄, a_ego, o_ego)  ->  b̄'
 
-        where:
+        carrying no state between calls beyond b̄ itself. The ego observes neither a_other
+        nor o_other, so both are marginalized out; the ego's own observation enters ONLY
+        as evidence about what the other agent is likely to have seen and done.
 
-            P(o_other | o_ego, a) = ∑_{s'} P(o_other | o_ego, a, s') · ∑_s T(s' | s, a) b̄(s)
+        Per candidate a_other (a = the joint action, ordered by role):
 
-            b̄_updated(s' | o_other, a) ∝ O_other(o_other | s', a) · ∑_s T(s' | s, a) b̄(s)
+          1. Their action distribution comes from their belief, since their behaviour last
+             timestep was a function of that belief alone:   π(a_other) = π*(b̄)(a_other)
 
-        and the joint action a is reconstructed from previous_ego_action and each
-        candidate a_other drawn from π*(b̄).
+          2. OUR side. We know our own action, so we condition on it: predict forward from
+             our own belief under the joint action (a_ego, a_other).
+
+                 pred_ego(s') = ∑_s T(s' | s, a_ego, a_other) b_ego(s)
+
+          3. Weight each (a_other, o_other) by how well it explains what WE saw. o_ego and
+             o_other are correlated -- through s' and through the joint observation model
+             -- so our own observation is evidence about theirs:
+
+                 w(a_other, o_other) ∝ π(a_other) · ∑_{s'} pred_ego(s') · O(o_ego, o_other | s', a)
+
+          4. THEIR side. They never saw our action, so their prior must NOT condition on
+             it; it marginalizes over what we might have done:
+
+                 pred_other_h(s') = ∑_s T(s' | s, a_ego', a_other) b̄(s)
+                 b_{a,o}(s') ∝ ∑_{a_ego'} P(a_ego') · pred_other_h(s') · O_other(o_other | s', ·)
+
+          5. Average over everything we cannot see:
+
+                 b̄'(s') = ∑_{a_other, o_other} w(a_other, o_other) · b_{a,o}(s')
+
+        Two asymmetries hold this together, and both are easy to get wrong:
+
+          - Step 4 never applies O_ego(o_ego | s') to b̄. Our observation is OUR private
+            information; the other agent did not see it, and folding it in would credit
+            them with knowledge they do not have. It only weights hypotheses, in step 3.
+
+          - Step 4 also does not use our actual action, though step 2 does. If we press
+            button 0, WE learn that state 0 is now impossible -- they do not. Building
+            their posterior under our real action would rule out a state they still fully
+            believe in. (This is precisely the bug that
+            test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out pins down.)
+
+        mode
+        ----
+        "mixture" (default)
+            Steps 4-5 above: average their POSTERIORS. This is the right shape for the
+            quantity being approximated -- the exact E[b_other] is itself a mixture of the
+            posteriors they would hold under each possible history -- so each component
+            stays sharp and only the mixing blurs.
+
+        "soft_evidence"
+            Accumulate the same components UNnormalized and apply Bayes once (Jeffrey's
+            rule) -- i.e. average their likelihood rather than their posterior. In
+            principle this pulls less hard, because an averaged likelihood is flatter in s'
+            than any single one.
+
+        In practice the two land in the same place on the guessing game (worst error 0.165
+        vs 0.169), so do not agonize over the choice. The two things that DO matter, by an
+        order of magnitude more than `mode`, are passing `ego_belief_distribution` and
+        seeding the estimate with `initial_other_belief_estimate` rather than the prior.
+
+        Measured against the exact model (memo-decpomdp, guessing game, ego waits twice and
+        sees symbols 1, 2, 2; exact E[b_other] = [0.875, 0.06, 0.06, 0]):
+
+            mixture                              [0.71, 0.13, 0.16, 0]   worst err 0.17
+            soft_evidence                        [0.71, 0.12, 0.18, 0]   worst err 0.17
+            mixture, no ego_belief_distribution  [0.50, 0.29, 0.21, 0]   worst err 0.37
+
+        The approximation, stated plainly
+        ---------------------------------
+        b̄ is a MEAN belief, and a mean belief is not a sufficient statistic in a DecPOMDP:
+        the exact object is a joint distribution over (world state, other's belief), and
+        their belief is a function of their whole history. Collapsing that joint to its
+        mean every step -- which carrying a single Categorical forces -- discards the
+        correlation between "what the state is" and "what they think it is", and the error
+        compounds. Two consequences worth knowing about:
+
+          - It cannot represent "they are certain, but I don't know of what". That looks
+            like a spread-out b̄, indistinguishable from "they are confused".
+          - Step 1 feeds b̄ back into π*, so an error in b̄ biases the action likelihood,
+            which biases the next b̄.
+
+        For the exact treatment see memo-decpomdp's build_recursive_belief_model, which
+        keeps the joint and does the recursion properly. This is the cheap version; it is
+        fine as long as you know which corner you cut.
 
         Args:
-            other_belief_distribution_estimate: The ego agent's current estimate of the
-                other agent's belief b̄(s), as a distrax.Categorical over states.
-            ego_observation: The observation received by the ego agent at this timestep.
-            previous_ego_action: The ego agent's action at the previous timestep.
-            other_optimal_policy: A callable π* mapping a belief distribution to a
-                distrax.Categorical over the other agent's actions.
+            other_belief_distribution_estimate: The ego's current estimate of the other
+                agent's belief b̄(s), as a distrax.Categorical over states.
+            ego_observation: The observation the ego received at this timestep.
+            previous_ego_action: The ego's OWN action at the previous timestep (not joint).
+            other_optimal_policy: A callable π* mapping a belief to a distrax.Categorical
+                over the other agent's actions.
+            agent_id: The EGO agent's id (0 or 1). May be traced.
+            ego_belief_distribution: The EGO's OWN belief at the previous timestep. Pass
+                it. It is the only channel by which the ego's private knowledge reaches
+                the estimate: the ego uses it to work out which states it may have entered
+                and therefore which observations the other agent plausibly received. Left
+                as None it falls back to b̄, which asks the other agent to guess its own
+                observation from its own belief -- much weaker (worst-case error 0.37 vs
+                0.17 in the benchmark above).
+            ego_action_prior: What the OTHER agent assumes about OUR action, as a length-A
+                array -- they never observed it. Defaults to uniform, the level-0
+                assumption, which is also what memo-decpomdp's exact model uses, so the two
+                remain comparable. This is where the I-POMDP regress is cut: modelling it
+                properly would require their estimate of OUR belief, and then ours of
+                theirs, forever.
+            mode: "mixture" (default) or "soft_evidence"; a static Python string.
 
         Returns:
             A new distrax.Categorical representing the updated estimate b̄'(s').
         """
-        other_action_dist = other_optimal_policy(other_belief_distribution_estimate)
+        states = jnp.arange(self.num_unique_states)
+        actions = jnp.arange(self.num_unique_actions)
+
+        # The ego's own belief drives the guess at what THEY saw (step 3). Falling back to
+        # b̄ here is a real downgrade: b̄ is the other agent's view of the world, and it does
+        # not know what the ego knows. See the `ego_belief_distribution` note below.
+        if ego_belief_distribution is None:
+            ego_belief_distribution = other_belief_distribution_estimate
+
+        # What the OTHER agent assumes about OUR action -- they never saw it. Uniform is
+        # the level-0 assumption, and it matches what memo-decpomdp's exact model does
+        # (`opp: chooses(a in Ac, uniformly)`), so the two stay comparable.
+        if ego_action_prior is None:
+            ego_action_prior = jnp.ones(self.num_unique_actions) / self.num_unique_actions
+
+        # 1. Their action distribution, from the belief we think they hold. Their
+        #    behaviour last timestep was a function of that belief alone.
+        policy_probs = other_optimal_policy(other_belief_distribution_estimate).probs  # (A,)
+
+        def transition_prior(belief, joint_action):
+            """∑_s T(s' | s, a) belief(s), as a vector over s'."""
+            return jax.vmap(lambda next_state: jnp.sum(jax.vmap(
+                lambda state: self.joint_transition_function(state, joint_action).prob(next_state)
+                * belief.prob(state)
+            )(states)))(states)
+
+        def observation_rows(next_state, joint_action):
+            joint_obs = self.joint_observation_function(next_state, joint_action)
+            # Row-major (var1 = agent 0's obs, var2 = agent 1's obs), per
+            # JointCategoricalPair and FlexibleEnv.get_obs.
+            grid = joint_obs.probs.reshape(
+                self.num_unique_observations, self.num_unique_observations
+            )
+            # P(o_ego, o_other | s', a) with the ego's ACTUAL observation pinned, as a
+            # function of o_other. This term carries the ego's private information into
+            # its guess about what the other agent saw.
+            joint_with_ego = jax.lax.cond(
+                agent_id == 0,
+                lambda _: grid[ego_observation, :],   # ego is var1, so o_other is var2
+                lambda _: grid[:, ego_observation],   # ego is var2, so o_other is var1
+                None,
+            )
+            # O_other(o_other | s', a): the other agent's own marginal likelihood.
+            # marginalize_var1 sums out agent 0, leaving agent 1's marginal.
+            other_marginal = jax.lax.cond(
+                agent_id == 0,
+                lambda _: self.joint_factory.marginalize_var1(joint_obs).probs,
+                lambda _: self.joint_factory.marginalize_var2(joint_obs).probs,
+                None,
+            )
+            return joint_with_ego, other_marginal
 
         def as_if_other_took_action(other_action):
-            joint_action = self.joint_action_constructor(agent_id, previous_ego_action, other_action)
+            # --- OUR side. We know our own action, so we condition on it. ---
+            actual_joint = self.joint_action_constructor(
+                agent_id, previous_ego_action, other_action)
 
-            def updated_bj_under_obs(other_obs):
-                """Run agent j's full belief update under this hypothetical o_other."""
-                # 1 - agent_id (not int(not ...)) so agent_id may be a traced array,
-                # letting callers vmap these updates over per-agent roles.
-                updated_bj_probs = self.update_with_observation_and_joint_action(
-                    other_belief_distribution_estimate, other_obs, joint_action, agent_id=1 - agent_id
-                ).probs
-                return updated_bj_probs
+            predicted_ego = transition_prior(ego_belief_distribution, actual_joint)  # (S',)
+            joint_with_ego, _ = jax.vmap(
+                lambda s_: observation_rows(s_, actual_joint))(states)               # (S', O)
 
-            def weight_of_obs(other_obs):
-                """P(o_other | o_ego, a) under the current estimated belief — marginalized over s'."""
-                def per_state(next_state):
-                    transition_prior = jnp.sum(
-                        jax.vmap(lambda s: self.joint_transition_function(s, joint_action).prob(next_state)
-                                * other_belief_distribution_estimate.prob(s))(jnp.arange(self.num_unique_states))
-                    )
-                    joint_obs = self.joint_observation_function(next_state, joint_action)
-                    joint_obs_likelihood = jax.lax.cond(
-                        agent_id == 0,
-                        lambda x: self.joint_factory.prob(joint_obs, ego_observation, x),
-                        lambda x: self.joint_factory.prob(joint_obs, x, ego_observation),
-                        other_obs,
-                    )
-                    ego_marginal = jax.lax.cond(
-                        agent_id == 0,
-                        lambda _: self.joint_factory.marginalize_var1(joint_obs).prob(ego_observation),
-                        lambda _: self.joint_factory.marginalize_var2(joint_obs).prob(ego_observation),
-                        None,
-                    )
-                    return transition_prior * jnp.nan_to_num(joint_obs_likelihood / ego_marginal)
+            # 3. How likely each o_other is, jointly with the o_ego we actually saw:
+            #       ∑_{s'} pred_ego(s') · O(o_ego, o_other | s', a)
+            #    pred_EGO, not pred_other: this is the ego reasoning about which states IT
+            #    may have entered and what the other agent would have seen there. It is the
+            #    only channel by which the ego's private knowledge reaches the estimate.
+            #    Unnormalized -- normalization happens once, jointly over (a_other,
+            #    o_other), below, so o_ego is also allowed to be evidence about their ACTION.
+            observation_weights = predicted_ego @ joint_with_ego                     # (O,)
 
-                return jnp.sum(jax.vmap(per_state)(jnp.arange(self.num_unique_states)))
+            # --- THEIR side. They never saw our action, so they must NOT condition on it. ---
+            # This is the asymmetry that makes the whole thing subtle. If we press button 0,
+            # WE know state 0 is now impossible -- but they do not, and modelling their
+            # posterior under our actual action would rule out a state they still believe
+            # in. So their prior marginalizes over what we might have done.
+            def under_hypothetical_ego_action(hypothetical_ego_action):
+                joint = self.joint_action_constructor(
+                    agent_id, hypothetical_ego_action, other_action)
+                predicted = transition_prior(other_belief_distribution_estimate, joint)  # (S',)
+                _, other_marginal = jax.vmap(
+                    lambda s_: observation_rows(s_, joint))(states)                      # (S', O)
+                # Their unnormalized posterior mass, per (o_other, s'), for this hypothesis.
+                return (predicted[:, None] * other_marginal).T                           # (O, S')
 
-            all_obs = jnp.arange(self.num_unique_observations)
-            weights = jax.vmap(weight_of_obs)(all_obs)          # (O,)
-            # Zero out non-finite rows before the weighted sum. Some hypothetical o_other are
-            # impossible given the current belief (e.g. the deterministic "done" symbol from a
-            # non-terminal belief), so their per-obs update is a 0/0 -> NaN. Their weight is
-            # correctly 0, but 0 * NaN = NaN would poison the einsum below and NaN the whole
-            # estimate. nan_to_num sends those rows to 0, and a 0-weight * 0 contributes nothing.
-            all_probs = jnp.nan_to_num(jax.vmap(updated_bj_under_obs)(all_obs))  # (O, S)
+            # 4. Their posterior had they seen o_other, marginalizing our unseen action:
+            #       b_{a,o}(s') ∝ ∑_{a_ego'} P(a_ego') · pred_{a_ego'}(s') · O_other(o | s', ·)
+            per_hypothesis = jax.vmap(under_hypothetical_ego_action)(actions)   # (A_ego, O, S')
+            posteriors = jnp.einsum("h,hos->os", ego_action_prior, per_hypothesis)   # (O, S')
+            mass = jnp.sum(posteriors, axis=1, keepdims=True)
+            normalized = posteriors / jnp.where(mass > 0, mass, 1.0)
 
-            # weighted average of updated beliefs over o_other
-            return jnp.einsum('o,os->s', weights, all_probs) * other_action_dist.prob(other_action)
+            return observation_weights, normalized, posteriors
 
-        # marginalize over other agent's action
-        all_actions = jnp.arange(self.num_unique_actions)
-        unnorm = jnp.sum(jax.vmap(as_if_other_took_action)(all_actions), axis=0)  # (S,)
-        return distrax.Categorical(probs=unnorm / jnp.sum(unnorm))
+        # (A, O), (A, O, S), (A, O, S)
+        observation_weights, posteriors, unnormalized_posteriors = \
+            jax.vmap(as_if_other_took_action)(actions)
+
+        # P(a_other, o_other | b̄, a_ego, o_ego), unnormalized.
+        weights = policy_probs[:, None] * observation_weights          # (A, O)
+
+        if mode == "mixture":
+            # 5a. Average their POSTERIORS, each normalized first. This is the right shape
+            #     for the thing being approximated: the exact E[b_other] is itself a mixture
+            #     of the posteriors the other agent would hold under each history, so mixing
+            #     normalized posteriors keeps every component sharp and blurs only across
+            #     components.
+            unnormalized = jnp.einsum("ao,aos->s", weights, posteriors)
+        elif mode == "soft_evidence":
+            # 5b. Do not normalize the components first -- just accumulate the unnormalized
+            #     mass and Bayes once (Jeffrey's rule). Equivalent to averaging their
+            #     LIKELIHOOD rather than their posterior, which pulls less hard, because an
+            #     averaged likelihood is flatter in s' than any single one. Kept for
+            #     comparison; see the mode note in the docstring.
+            unnormalized = jnp.einsum("ao,aos->s", weights, unnormalized_posteriors)
+        else:
+            raise ValueError(f"mode must be 'mixture' or 'soft_evidence', got {mode!r}")
+
+        # If every branch died -- an (a_ego, o_ego) this estimate says is impossible --
+        # leave the estimate untouched rather than emitting NaNs.
+        total = jnp.sum(unnormalized)
+        probs = jnp.where(
+            total > 0,
+            unnormalized / jnp.where(total > 0, total, 1.0),
+            other_belief_distribution_estimate.probs,
+        )
+        return distrax.Categorical(probs=probs)
