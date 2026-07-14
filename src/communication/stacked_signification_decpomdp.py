@@ -276,8 +276,15 @@ class StackedSignificationDecPOMDP:
                     other_policy,
                     agent_id=role,
                 )
+                # ``ego_belief`` here is the PRE-update belief, and it must be: the estimate
+                # predicts forward through this step's transition itself, so passing
+                # ``new_true`` (which has already absorbed this observation) would apply the
+                # step twice. It is also the only channel by which the ego's private
+                # information reaches the estimate -- it says which states the EGO may have
+                # entered, and hence which observations its partner plausibly received.
                 new_estimate = belief_factory.update_other_belief_estimate_with_observation_only(
                     other_belief_estimate,
+                    ego_belief,
                     observation,
                     action,
                     other_policy,
@@ -795,19 +802,6 @@ class StackedSignificationDecPOMDP:
         )
 
         true_agent_belief_states = agent_initial_belief_states
-        # The old TODO here ("this is wrong, I should calculate these differently") is
-        # resolved, and the answer is that there is nothing to calculate. Before anyone has
-        # observed anything, the estimate of a partner's belief IS the prior -- and so is
-        # the estimate of their estimate of ours, all the way down the hierarchy. Averaging
-        # a posterior over its own prior predictive returns the prior (law of total
-        # expectation), so with a single shared prior every level collapses onto it.
-        #
-        # This holds only because no reset observation is consumed here: the beliefs above
-        # are pre-observation, and last_agent_observations is -1 until the first step. If
-        # this reset ever starts handing agents an observation, the estimate stops being the
-        # prior -- your observation is correlated with your partner's, so it is evidence
-        # about what they saw and hence what they now believe -- and this line must become
-        # tools.belief_representations.initial_other_belief_estimate(o_ego).
         estimated_agent_belief_states = agent_initial_belief_states
         # Default (communicate-first) path: no act yet, so no reward and no action.
         last_agent_rewards = jnp.zeros((self.num_agents,), dtype=jnp.float32)

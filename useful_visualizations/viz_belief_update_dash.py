@@ -11,14 +11,23 @@ Timing within one step: action -> state transitions -> observation. The action y
 for an agent is the action IT takes; the observation you supply is what it then receives as
 a consequence (the belief update transitions under the action, then conditions on the obs).
 
+Row 0 is the RESET, and it is not the prior. Reset emits an observation to each agent, and
+that observation is already evidence -- about the state, and (because the two agents' symbols
+are correlated through the state) about what the partner saw and hence now believes. So you
+pick a reset observation per agent too, and row 0 is seeded with
+``CategoricalBeliefState.initial_belief`` / ``initial_other_belief_estimate`` rather than with
+``initial_state_distribution``. Seeding at the prior instead is a real modelling error, not a
+cosmetic one; ``tests/test_belief_representations.py::test_the_reset_observation_beats_the_prior``
+pins the difference down.
+
 All FOUR beliefs are drawn as [step x state] trajectory heatmaps, paired as the two natural
 sanity checks -- does each agent's estimate of its partner track the partner's real belief?
 
   * agent 0 true b0(s)      vs   agent 1's estimate of 0   b̄_{1->0}(s)
   * agent 1 true b1(s)      vs   agent 0's estimate of 1   b̄_{0->1}(s)
 
-plus grouped bars for the latest step. Undo pops the last step; Reset re-initializes both
-agents to the game's prior.
+plus grouped bars for the latest step. Undo pops the last step; Reset re-seeds both agents
+from the reset observations currently selected.
 
 Run:  uv run python -m useful_visualizations.viz_belief_update_dash
 then open http://127.0.0.1:8050  (set PORT / HOST env vars to override).
@@ -48,7 +57,9 @@ _FACTORY = CategoricalBeliefState(_PARAMS)
 S = int(_PARAMS.num_states)
 A = int(_PARAMS.num_actions)
 O = _PARAMS.observation.shape[-1]
-_PRIOR = np.asarray(_PARAMS.initial_belief_states[0])  # uniform over non-terminal states
+# The world's prior over the true state. It is NOT what an agent believes after reset --
+# reset hands out an observation, and row 0 conditions on it (see initial_store).
+_PRIOR = np.asarray(_PARAMS.initial_state_distribution)
 
 STATE_LABELS = [f"s={s}" for s in range(S)]
 # The last observation symbol is the dedicated "done" signal, emitted only in the
@@ -56,6 +67,9 @@ STATE_LABELS = [f"s={s}" for s in range(S)]
 DONE_OBS = O - 1
 OBS_LABELS = [f"o={o}" for o in range(O - 1)] + [f"o={DONE_OBS} (done)"]
 OBS_OPTIONS = [{"label": OBS_LABELS[o], "value": o} for o in range(O)]
+# The initial state is never terminal, so the done symbol cannot be a RESET observation --
+# conditioning the prior on it would divide by zero. Offer only the referent symbols here.
+RESET_OBS_OPTIONS = [{"label": OBS_LABELS[o], "value": o} for o in range(O - 1)]
 ACTION_LABELS = [f"press s{a}" for a in range(A - 1)] + ["wait"]
 ACTION_OPTIONS = [{"label": lab, "value": a} for a, lab in enumerate(ACTION_LABELS)]
 
@@ -74,21 +88,52 @@ def step_belief(role, belief, estimate, obs, action):
     b = distrax.Categorical(probs=np.asarray(belief, dtype=float))
     e = distrax.Categorical(probs=np.asarray(estimate, dtype=float))
     new_true = _FACTORY.update_with_observation_only(b, e, int(obs), int(action), partner_policy, agent_id=int(role))
-    new_est = _FACTORY.update_other_belief_estimate_with_observation_only(e, int(obs), int(action), partner_policy, agent_id=int(role))
+    # `b` -- the ego's OWN belief, as of BEFORE this step -- is a required argument, and it
+    # is the pre-update `b`, not `new_true`: the estimate predicts forward through the same
+    # transition, so handing it a belief that has already absorbed this step's observation
+    # would apply the step twice. It is also the only channel by which the ego's private
+    # information reaches the estimate (it says which states the EGO may have entered, and
+    # hence which symbols the partner plausibly saw). Passing b̄ instead roughly doubles the
+    # error against the exact model, which is why the engine now refuses to default it.
+    new_est = _FACTORY.update_other_belief_estimate_with_observation_only(
+        e,
+        b,
+        int(obs),
+        int(action),
+        partner_policy,
+        agent_id=int(role),
+    )
     return np.asarray(new_true.probs), np.asarray(new_est.probs)
 
 
-def initial_store():
-    """A fresh trajectory: row 0 is the prior for every belief and estimate.
+def initial_store(reset_obs0=0, reset_obs1=0):
+    """A fresh trajectory seeded from the RESET observations, not from the prior.
+
+    Reset is not a blank slate. Each agent already sees a symbol, so its own belief is the
+    prior conditioned on that symbol (``initial_belief``), and its estimate of its partner
+    has ALSO moved off the prior (``initial_other_belief_estimate``) -- the two agents'
+    symbols are correlated through the shared state, so my symbol is evidence about yours,
+    and therefore about what you now believe. Starting everything at ``_PRIOR`` throws that
+    step of evidence away; see test_the_reset_observation_beats_the_prior.
+
+    These are the only two updates with no action before them, which is why they are
+    separate methods rather than a call to the ordinary update with a placeholder action:
+    a placeholder would silently run a TRANSITION as well ("agent 0 pressed button 0").
 
     Keys are subject-indexed. ``true{i}`` is agent i's own belief; ``est{i}`` is agent i's
     estimate of its partner (so ``est0`` = b̄_{0->1}, ``est1`` = b̄_{1->0}).
     """
+    reset = {}
+    for role, obs in ((0, reset_obs0), (1, reset_obs1)):
+        reset[f"true{role}"] = np.asarray(_FACTORY.initial_belief(int(obs), agent_id=role).probs)
+        reset[f"est{role}"] = np.asarray(_FACTORY.initial_other_belief_estimate(int(obs), agent_id=role).probs)
+
     return {
-        "true0": [_PRIOR.tolist()],
-        "est0": [_PRIOR.tolist()],
-        "true1": [_PRIOR.tolist()],
-        "est1": [_PRIOR.tolist()],
+        "true0": [reset["true0"].tolist()],
+        "est0": [reset["est0"].tolist()],
+        "true1": [reset["true1"].tolist()],
+        "est1": [reset["est1"].tolist()],
+        "reset": {"o0": int(reset_obs0), "o1": int(reset_obs1)},
         "steps": [],  # list of {"o0","o1","a0","a1"}
         "note": "",  # last-action message (e.g. a rejected impossible observation)
     }
@@ -132,6 +177,7 @@ def apply_step(store, o0, a0, o1, a1):
         }
 
     return {
+        **store,
         "true0": store["true0"] + [nt0.tolist()],
         "est0": store["est0"] + [ne0.tolist()],
         "true1": store["true1"] + [nt1.tolist()],
@@ -142,10 +188,11 @@ def apply_step(store, o0, a0, o1, a1):
 
 
 def undo(store):
-    """Pop the last step (no-op at the initial prior)."""
+    """Pop the last step (no-op at the reset row)."""
     if not store["steps"]:
         return {**store, "note": ""}
     return {
+        **store,
         "true0": store["true0"][:-1],
         "est0": store["est0"][:-1],
         "true1": store["true1"][:-1],
@@ -160,7 +207,8 @@ def _obs_str(o):
 
 
 def _row_labels(store):
-    labels = ["start (prior)"]
+    reset = store.get("reset", {"o0": 0, "o1": 0})
+    labels = [f"reset: o0={_obs_str(reset['o0'])} | o1={_obs_str(reset['o1'])}"]
     for i, s in enumerate(store["steps"]):
         labels.append(f"t{i}: a0={ACTION_LABELS[s['a0']]}, o0={_obs_str(s['o0'])} | " f"a1={ACTION_LABELS[s['a1']]}, o1={_obs_str(s['o1'])}")
     return labels
@@ -266,6 +314,34 @@ _controls = html.Div(
     style={"display": "flex", "gap": "28px", "alignItems": "flex-end", "flexWrap": "wrap"},
 )
 
+# The reset observations seed row 0, so changing them only takes effect on Reset. They are
+# no-action observations -- there is no step before them -- which is why they are a separate
+# control rather than a step whose action you leave on "wait".
+_reset_controls = html.Div(
+    [
+        html.Label("reset observations (seed row 0; applied on Reset)", style={"fontWeight": "600"}),
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Label(f"agent {idx}"),
+                        dcc.Dropdown(
+                            id=f"reset_obs{idx}",
+                            options=RESET_OBS_OPTIONS,
+                            value=idx,  # two different symbols, so the agents start out disagreeing
+                            clearable=False,
+                            style={"width": "110px"},
+                        ),
+                    ]
+                )
+                for idx in (0, 1)
+            ],
+            style={"display": "flex", "gap": "10px"},
+        ),
+    ],
+    style={"marginTop": "14px"},
+)
+
 
 def _heat_row(a_id, b_id):
     return html.Div(
@@ -281,10 +357,12 @@ app.layout = html.Div(
             "Supply an action + resulting observation for each agent, then Apply. "
             "Both agents' beliefs advance together; each partner's action is "
             "marginalized through their optimal policy. Timing within a step: "
-            "action → state transitions → observation."
+            "action → state transitions → observation. Row 0 is the reset, seeded from "
+            "each agent's reset observation — not from the prior."
         ),
         _controls,
-        dcc.Store(id="store", data=initial_store()),
+        _reset_controls,
+        dcc.Store(id="store", data=initial_store(0, 1)),
         html.Div(id="banner", style={"minHeight": "0", "margin": "8px 0"}),
         html.H4("agent 0's belief vs how agent 1 models it"),
         _heat_row("true0_heat", "est_of_0_heat"),
@@ -308,13 +386,15 @@ app.layout = html.Div(
     State("action0", "value"),
     State("obs1", "value"),
     State("action1", "value"),
+    State("reset_obs0", "value"),
+    State("reset_obs1", "value"),
     State("store", "data"),
     prevent_initial_call=True,
 )
-def _update_store(_apply, _undo, _reset, o0, a0, o1, a1, store):
+def _update_store(_apply, _undo, _reset, o0, a0, o1, a1, r0, r1, store):
     trigger = ctx.triggered_id
     if trigger == "reset":
-        return initial_store()
+        return initial_store(r0, r1)
     if trigger == "undo":
         return undo(store)
     if trigger == "apply":
