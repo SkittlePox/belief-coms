@@ -806,12 +806,10 @@ class StackedSignificationDecPOMDP:
         game_types_per_game = route.game_set  # [num_games]
         agent_game_types = game_types_per_game[route.agent_game_assignment]  # [num_agents]
 
-        # Each agent's initial belief. estimated_agent_belief_states is subject-indexed
-        # (row i = the estimate ABOUT agent i); before any communication the partner's
-        # estimate of agent i is just agent i's own prior, so the two rows coincide at
-        # the start of an episode.
-        agent_initial_belief_states = self.all_env_parameters.initial_belief_states[
-            agent_game_types, agent_role_assignment
+        # Each agent's initial belief IS its game's world prior -- every agent, every role.
+        # (There is no per-role initial belief; see FlexibleEnvParams.)
+        agent_initial_belief_states = self.all_env_parameters.initial_state_distribution[
+            agent_game_types
         ]
 
         # Sample each game's true initial world state from its initial-state dist.
@@ -822,6 +820,19 @@ class StackedSignificationDecPOMDP:
         )
 
         true_agent_belief_states = agent_initial_belief_states
+        # The old TODO here ("this is wrong, I should calculate these differently") is
+        # resolved, and the answer is that there is nothing to calculate. Before anyone has
+        # observed anything, the estimate of a partner's belief IS the prior -- and so is
+        # the estimate of their estimate of ours, all the way down the hierarchy. Averaging
+        # a posterior over its own prior predictive returns the prior (law of total
+        # expectation), so with a single shared prior every level collapses onto it.
+        #
+        # This holds only because no reset observation is consumed here: the beliefs above
+        # are pre-observation, and last_agent_observations is -1 until the first step. If
+        # this reset ever starts handing agents an observation, the estimate stops being the
+        # prior -- your observation is correlated with your partner's, so it is evidence
+        # about what they saw and hence what they now believe -- and this line must become
+        # tools.belief_representations.initial_other_belief_estimate(o_ego).
         estimated_agent_belief_states = agent_initial_belief_states
         # Default (communicate-first) path: no act yet, so no reward and no action.
         last_agent_rewards = jnp.zeros((self.num_agents,), dtype=jnp.float32)

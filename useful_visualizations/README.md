@@ -10,7 +10,8 @@ the three views read as one system.
 
 ## Run
 
-From `src/`:
+From the repo root (this package is dev-only — it is not part of the installed
+library, so it is imported from the working directory rather than the environment):
 
 ```bash
 # all three

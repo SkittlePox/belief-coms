@@ -26,7 +26,6 @@ packages = [
     "src/envs",
     "src/tools",
     "src/training",
-    "src/useful_visualizations",
 ]
 
 [dependency-groups]

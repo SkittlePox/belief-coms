@@ -73,9 +73,7 @@ class ExactReturnEvaluator:
 
         def as_if_ego_acts(ego_action):
             def as_if_other_acts(other_action):
-                joint_action = self.joint_action_constructor(
-                    ego_agent_id, ego_action, other_action
-                )
+                joint_action = self.joint_action_constructor(ego_agent_id, ego_action, other_action)
                 next_state_dist = self.joint_transition_function(state, joint_action)
 
                 # ∑_{s'} T(s'|s,a) R_ego(s,a,s'): gather the ego agent's reward row
@@ -113,17 +111,11 @@ class ExactReturnEvaluator:
                             _new_ego_belief=new_ego_belief,
                             _new_other_belief=new_other_belief,
                         ):
-                            joint_obs_dist = self.joint_observation_function(
-                                next_state, joint_action
-                            )
+                            joint_obs_dist = self.joint_observation_function(next_state, joint_action)
                             obs_prob = jax.lax.cond(
                                 ego_agent_id == 0,
-                                lambda _: belief_state_factory.joint_factory.prob(
-                                    joint_obs_dist, _ego_obs, _other_obs
-                                ),
-                                lambda _: belief_state_factory.joint_factory.prob(
-                                    joint_obs_dist, _other_obs, _ego_obs
-                                ),
+                                lambda _: belief_state_factory.joint_factory.prob(joint_obs_dist, _ego_obs, _other_obs),
+                                lambda _: belief_state_factory.joint_factory.prob(joint_obs_dist, _other_obs, _ego_obs),
                                 None,
                             )
                             future_v = self.evaluate_expected_returns(
@@ -142,13 +134,11 @@ class ExactReturnEvaluator:
                             jnp.nan_to_num(jax.vmap(per_next_state)(jnp.arange(self.num_unique_states)))
                         )
 
-                return (immediate + discount_factor * future) * other_action_dist.prob(
-                    other_action
-                )
+                return (immediate + discount_factor * future) * other_action_dist.prob(other_action)
 
-            return jnp.sum(
-                jax.vmap(as_if_other_acts)(jnp.arange(self.num_unique_actions))
-            ) * ego_action_dist.prob(ego_action)
+            return jnp.sum(jax.vmap(as_if_other_acts)(jnp.arange(self.num_unique_actions))) * ego_action_dist.prob(
+                ego_action
+            )
 
         return jnp.sum(jax.vmap(as_if_ego_acts)(jnp.arange(self.num_unique_actions)))
 
@@ -256,20 +246,14 @@ def monte_carlo_returns(
             agent_1_action = agent_1_policy(b1).sample(seed=a1_rng)
             joint_action = (agent_0_action, agent_1_action)
 
-            next_state, (next_o0, next_o1), (r0, r1), done = env.step_env(
-                env_rng, env_state, joint_action
-            )
+            next_state, (next_o0, next_o1), (r0, r1), done = env.step_env(env_rng, env_state, joint_action)
 
             active = 1.0 - done_before
             return_0 = return_0 + discount * r0 * active
             return_1 = return_1 + discount * r1 * active
 
-            b0 = belief_factory.update_with_observation_and_joint_action(
-                b0, next_o0, joint_action, agent_id=0
-            )
-            b1 = belief_factory.update_with_observation_and_joint_action(
-                b1, next_o1, joint_action, agent_id=1
-            )
+            b0 = belief_factory.update_with_observation_and_joint_action(b0, next_o0, joint_action, agent_id=0)
+            b1 = belief_factory.update_with_observation_and_joint_action(b1, next_o1, joint_action, agent_id=1)
 
             done_after = jnp.maximum(done_before, done.astype(jnp.float32))
             carry = (next_state, b0, b1, return_0, return_1, discount * discount_factor, done_after)
@@ -285,9 +269,7 @@ def monte_carlo_returns(
             jnp.array(0.0),
         )
         step_rngs = jax.random.split(episode_rng, max_steps)
-        (_s, _b0, _b1, return_0, return_1, _disc, _done), _ = jax.lax.scan(
-            step_body, init_carry, step_rngs
-        )
+        (_s, _b0, _b1, return_0, return_1, _disc, _done), _ = jax.lax.scan(step_body, init_carry, step_rngs)
         return (return_0, return_1), next_rng
 
     def scan_body(rng, _):
@@ -303,9 +285,10 @@ if __name__ == "__main__":
     from envs.guessing_game import guessing_game_spec
 
     params, policies = guessing_game_spec()
+    # Both agents start from the world prior -- there is no per-role initial belief.
     beliefs = (
-        distrax.Categorical(probs=params.initial_belief_states[0]),
-        distrax.Categorical(probs=params.initial_belief_states[1]),
+        distrax.Categorical(probs=params.initial_state_distribution),
+        distrax.Categorical(probs=params.initial_state_distribution),
     )
 
     exact = exact_expected_returns(guessing_game_spec, policies, beliefs, evaluation_depth=2)

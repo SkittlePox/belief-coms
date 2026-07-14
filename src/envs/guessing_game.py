@@ -123,8 +123,9 @@ def guessing_game_spec(
     num_states=4, num_actions=4, num_observations=4, num_agents=2, done_state=3
 ) -> Tuple[FlexibleEnvParams, Tuple[OptimalPolicy, OptimalPolicy]]:
     """EnvSpec for the guessing game: (FlexibleEnvParams, per-role policies)."""
-    # Uniform prior over the non-terminal states; same for the world state and
-    # for both roles' initial beliefs.
+    # Uniform prior over the non-terminal states. This is both the world's initial
+    # state distribution and every agent's initial belief -- there is no separate
+    # per-role prior; see FlexibleEnvParams.
     nonterminal = jnp.ones(num_states).at[done_state].set(0.0)
     nonterminal = nonterminal / nonterminal.sum()
 
@@ -134,7 +135,6 @@ def guessing_game_spec(
         reward=build_reward_tensor(num_states, num_actions, num_agents, done_state),
         num_actions=jnp.array(num_actions),
         num_states=jnp.array(num_states),
-        initial_belief_states=jnp.broadcast_to(nonterminal, (num_agents, num_states)),
         initial_state_distribution=nonterminal,
         terminal_mask=jnp.zeros(num_states).at[done_state].set(1.0),
     )
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     presser_obs_dist = params.observation[true_state, 0, 0].sum(axis=1)  # O(o | true_state)
 
     print(f"\n=== Learning by waiting (presser, true state = {true_state}) ===")
-    belief = distrax.Categorical(probs=params.initial_belief_states[0])
+    belief = distrax.Categorical(probs=params.initial_state_distribution)
     print(f"  start : belief = {belief.probs}")
     key = jax.random.key(0)
     for t in range(12):

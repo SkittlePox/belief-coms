@@ -10,7 +10,6 @@ wheels/
 .venv
 
 # Generated visualization HTML
-src/useful_visualizations/renders/
+useful_visualizations/renders/
 
 *.DS_Store
-src/useful_visualizations/.DS_Store

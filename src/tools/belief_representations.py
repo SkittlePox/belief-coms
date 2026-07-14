@@ -52,7 +52,7 @@ class CategoricalBeliefState:
             lambda _: (other_action, ego_action),
             None,
         )
-
+    
     def update_with_observation_and_joint_action(
         self, 
         belief_distribution: distrax.Categorical, 
@@ -278,11 +278,11 @@ class CategoricalBeliefState:
     def update_other_belief_estimate_with_observation_only(
         self,
         other_belief_distribution_estimate: distrax.Categorical,
+        ego_belief_distribution: distrax.Categorical,
         ego_observation,
         previous_ego_action,
         other_optimal_policy,
         agent_id = 0,   # This is the ego agent's id!
-        ego_belief_distribution: distrax.Categorical = None,
         ego_action_prior = None,
         mode = "mixture",
     ):
@@ -386,13 +386,13 @@ class CategoricalBeliefState:
             other_optimal_policy: A callable π* mapping a belief to a distrax.Categorical
                 over the other agent's actions.
             agent_id: The EGO agent's id (0 or 1). May be traced.
-            ego_belief_distribution: The EGO's OWN belief at the previous timestep. Pass
-                it. It is the only channel by which the ego's private knowledge reaches
-                the estimate: the ego uses it to work out which states it may have entered
-                and therefore which observations the other agent plausibly received. Left
-                as None it falls back to b̄, which asks the other agent to guess its own
-                observation from its own belief -- much weaker (worst-case error 0.37 vs
-                0.17 in the benchmark above).
+            ego_belief_distribution: REQUIRED. The EGO's OWN belief at the previous
+                timestep (from update_with_observation_only, or initial_belief at reset).
+                It is the only channel by which the ego's private knowledge reaches the
+                estimate: the ego uses it to work out which states IT may have entered, and
+                hence which observations the other agent plausibly received. This used to
+                default to b̄, which silently roughly doubled the error (0.17 -> 0.37), so
+                it is now mandatory rather than a trap.
             ego_action_prior: What the OTHER agent assumes about OUR action, as a length-A
                 array -- they never observed it. Defaults to uniform, the level-0
                 assumption, which is also what memo-decpomdp's exact model uses, so the two
@@ -406,12 +406,6 @@ class CategoricalBeliefState:
         """
         states = jnp.arange(self.num_unique_states)
         actions = jnp.arange(self.num_unique_actions)
-
-        # The ego's own belief drives the guess at what THEY saw (step 3). Falling back to
-        # b̄ here is a real downgrade: b̄ is the other agent's view of the world, and it does
-        # not know what the ego knows. See the `ego_belief_distribution` note below.
-        if ego_belief_distribution is None:
-            ego_belief_distribution = other_belief_distribution_estimate
 
         # What the OTHER agent assumes about OUR action -- they never saw it. Uniform is
         # the level-0 cop-out, and it is only the DEFAULT, not the answer. What they
@@ -427,6 +421,20 @@ class CategoricalBeliefState:
         # Feed its bel[2] in here, or just use it instead of this method.
         if ego_action_prior is None:
             ego_action_prior = jnp.ones(self.num_unique_actions) / self.num_unique_actions
+
+        if ego_belief_distribution is None:
+            # This used to fall back to b̄, and that silently roughly doubled the error
+            # (worst case 0.17 -> 0.37): b̄ is the OTHER agent's view of the world, so
+            # standing it in here asks them to guess their own observation from their own
+            # belief, which is nearly uninformative. The ego's own belief is the only
+            # channel by which the ego's private knowledge reaches the estimate, so it is
+            # required rather than quietly defaulted.
+            raise ValueError(
+                "ego_belief_distribution is required: it is what tells the estimate which "
+                "states the EGO may have entered, and hence which observations the other "
+                "agent plausibly received. Pass the ego's own belief (from "
+                "update_with_observation_only, or initial_belief at reset)."
+            )
 
         # 1. Their action distribution, from the belief we think they hold. Their
         #    behaviour last timestep was a function of that belief alone.

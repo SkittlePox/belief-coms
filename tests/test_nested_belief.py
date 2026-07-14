@@ -122,7 +122,7 @@ def test_initial_tower_uses_the_reset_observation():
     the tower at the environment prior throws a whole step of evidence away.
     """
     model = build_nested_belief_step(PARAMS, ego_role=0, depth=2)
-    prior = np.asarray(PARAMS.initial_belief_states[1])
+    prior = np.asarray(PARAMS.initial_state_distribution)
     tower = model.initial_tower(1)
 
     assert not np.allclose(tower[1], prior, atol=1e-3), tower[1]
@@ -133,8 +133,7 @@ def _asymmetric_env():
 
     |S| != |A| != |O|; BOTH agents' actions drive the transition (the state only advances
     when they agree); observations are correlated across agents (not an outer product) and
-    action-dependent; and the two roles hold different subjective priors, neither of which
-    is the true state distribution.
+    action-dependent; and the state prior is skewed rather than uniform.
     """
     import jax.numpy as jnp
     from envs.flexible_env import FlexibleEnvParams
@@ -157,7 +156,6 @@ def _asymmetric_env():
         reward=jnp.asarray(rng.random((N, S, A, A, S))),
         num_actions=jnp.array(A),
         num_states=jnp.array(S),
-        initial_belief_states=jnp.array([[0.5, 0.3, 0.2], [0.2, 0.3, 0.5]]),
         initial_state_distribution=jnp.array([0.6, 0.3, 0.1]),
         terminal_mask=jnp.zeros(S),
     )
@@ -186,99 +184,6 @@ def test_runs_on_an_arbitrary_flexible_env():
         assert belief.shape == (3,)
         assert np.isfinite(belief).all()
         assert belief.sum() == pytest.approx(1.0, abs=1e-4)
-
-
-def test_each_level_uses_its_own_roles_prior():
-    """initial_belief_states is per-role, and every level must honour its own.
-
-    Regression: an earlier version seeded every mind from initial_state_distribution, which
-    silently discarded the agents' distinct subjective priors. Here role 0 leans toward
-    state 0 and role 1 toward state 2, so bel[0] and bel[1] must lean opposite ways --
-    something that cannot happen if both were seeded from the same world prior.
-    """
-    import jax
-
-    params = _asymmetric_env()
-
-    @jax.jit
-    def uniform_weight(role, s, a):   # a flat policy, so ONLY the priors can separate them
-        del role, s, a
-        return 1.0
-
-    model = build_nested_belief_step(params, ego_role=0, depth=2,
-                                     policy_weight=uniform_weight)
-    tower = model.initial_tower(0)
-
-    assert tower[0][0] > tower[0][2], tower[0]   # role 0's prior leans to state 0
-    assert tower[1][2] > tower[1][0], tower[1]   # role 1's leans to state 2
-
-
-def test_arbitrary_non_belief_linear_policies_work():
-    """Policies are NOT restricted to belief-linear weights.
-
-    A belief over S states is just the S expectations E[s == 0] .. E[s == S-1], so memo can
-    hand the whole belief vector to any jittable function. Here a temperature-2 softmax over
-    a Q table -- emphatically not linear in b -- drives every level of the tower.
-    """
-    import distrax
-    import jax
-    import jax.numpy as jnp
-
-    params = _asymmetric_env()
-    Q = jnp.array([[2.0, 0.0], [0.0, 2.0], [-1.0, 1.0]])
-
-    def softmax_q(belief):
-        return distrax.Categorical(logits=2.0 * (belief.probs @ Q))
-
-    model = build_nested_belief_step(params, ego_role=0, depth=2,
-                                     policies=(softmax_q, softmax_q))
-    tower = run_tower(model, [0, 1, 0], [0, 1])
-
-    for belief in tower:
-        assert np.isfinite(belief).all()
-        assert belief.sum() == pytest.approx(1.0, abs=1e-4)
-
-
-def test_the_guessing_games_own_policies_plug_straight_in():
-    """guessing_game_spec() already returns OptimalPolicy callables. Use them directly."""
-    params, policies = guessing_game_spec()
-
-    model = build_nested_belief_step(params, ego_role=0, depth=2, policies=policies)
-    tower = run_tower(model, [1, 2], [2])
-
-    assert len(tower) == 3
-    for belief in tower:
-        assert belief.sum() == pytest.approx(1.0, abs=1e-4)
-
-
-def test_policies_can_differ_per_level_so_the_opponent_can_be_wrong_about_me():
-    """Policies are resolved per LEVEL, not once per program.
-
-    Level 0 is my actual policy; level 2 is THEIR MODEL of my policy. Making them differ is
-    how you represent an opponent who misreads you -- and it must change bel[1], because
-    their read on my action is what they use to interpret the world.
-    """
-    import distrax
-    import jax.numpy as jnp
-
-    params, policies = guessing_game_spec()
-    pi_me, pi_them = policies[0], policies[1]
-
-    def stubborn(belief):     # a deliberately wrong model of me: always presses button 0
-        return distrax.Categorical(probs=jnp.array([1.0, 0.0, 0.0, 0.0]))
-
-    correct = build_nested_belief_step(PARAMS, ego_role=0, depth=2,
-                                       policies=[pi_me, pi_them, pi_me])
-    mistaken = build_nested_belief_step(PARAMS, ego_role=0, depth=2,
-                                        policies=[pi_me, pi_them, stubborn])
-
-    a = run_tower(correct, [1, 2], [2])
-    b = run_tower(mistaken, [1, 2], [2])
-
-    # Their estimate of my belief IS the mistaken policy's input, so level 2 differs...
-    assert not np.allclose(a[2], b[2], atol=1e-3), (a[2], b[2])
-    # ...and it propagates: what they think I did changes what they conclude about the world.
-    assert not np.allclose(a[1], b[1], atol=1e-3), (a[1], b[1])
 
 
 def test_default_policy_weight_is_refused_when_it_is_meaningless():

@@ -247,11 +247,10 @@ def _init_mind(level: int, depth: int, owner_is_ego: bool, indent: str,
     """
     n = _names(owner_is_ego, top_level)
     out = [
-        # Each mind starts from ITS OWN role's prior. FlexibleEnvParams keeps
-        # initial_belief_states [role, S] separate from initial_state_distribution [S]
-        # precisely so the two agents may hold different subjective priors -- and different
-        # ones from the truth. Using the world prior everywhere would quietly discard that.
-        f"{indent}w: chooses(s in S, wpp={'P0_E' if owner_is_ego else 'P0_O'}(s)),",
+        # Every mind -- at every level, for either role -- starts from the world prior.
+        # There is no per-role initial belief: before anyone observes anything, my estimate
+        # of your belief, and of your estimate of mine, are all just P0.
+        f"{indent}w: chooses(s in S, wpp=P0(s)),",
         f"{indent}opp: knows(st),",
     ]
     if level < depth:
@@ -312,7 +311,7 @@ def _model_src(depth: int, num_states: int, build_id: str) -> str:
         "",
         f"_r = _REGISTRY[{build_id!r}]",
         "S, Ac, Ob = _r['S'], _r['Ac'], _r['Ob']",
-        "P0_E, P0_O, PRIOR = _r['P0_E'], _r['P0_O'], _r['PRIOR']",
+        "P0, PRIOR = _r['P0'], _r['PRIOR']",
         "TR, OBS, OBS_RESET = _r['TR'], _r['OBS'], _r['OBS_RESET']",
         *[f"POL{k} = _r['POL{k}']" for k in range(1, depth + 1)],
         "",
@@ -451,10 +450,8 @@ def build_nested_belief_step(
 
     transition = jnp.asarray(env_params.transition)
     observation = jnp.asarray(env_params.observation)
-    # Per-role subjective priors, NOT the world's initial_state_distribution. These may
-    # differ from each other and from the truth; FlexibleEnvParams keeps the field for
-    # exactly that reason.
-    role_priors = jnp.asarray(env_params.initial_belief_states)
+    # One prior, shared by the world and by every agent at every level of the hierarchy.
+    initial = jnp.asarray(env_params.initial_state_distribution)
     num_states = int(env_params.num_states)
     num_actions = int(env_params.num_actions)
     num_observations = int(observation.shape[-1])
@@ -497,12 +494,8 @@ def build_nested_belief_step(
         return (ego_thing, other_thing) if ego_role == 0 else (other_thing, ego_thing)
 
     @jax.jit
-    def P0_E(s):
-        return role_priors[ego_role, s]
-
-    @jax.jit
-    def P0_O(s):
-        return role_priors[other_role, s]
+    def P0(s):
+        return initial[s]
 
     @jax.jit
     def PRIOR(s, belief):
@@ -540,7 +533,7 @@ def build_nested_belief_step(
         S=jnp.arange(num_states),
         Ac=jnp.arange(num_actions),
         Ob=jnp.arange(num_observations),
-        P0_E=P0_E, P0_O=P0_O, PRIOR=PRIOR, TR=TR, OBS=OBS, OBS_RESET=OBS_RESET,
+        P0=P0, PRIOR=PRIOR, TR=TR, OBS=OBS, OBS_RESET=OBS_RESET,
         **{f"POL{k}": level_policies[k] for k in range(1, depth + 1)},
     )
 

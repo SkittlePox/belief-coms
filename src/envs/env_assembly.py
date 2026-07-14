@@ -66,7 +66,6 @@ def _pad_params(p: FlexibleEnvParams, target_states, target_actions, target_obs)
             ((0, 0), (0, pad_states), (0, pad_actions), (0, pad_actions), (0, pad_states)),
         ),
         # [num_roles, S]
-        initial_belief_states=jnp.pad(p.initial_belief_states, ((0, 0), (0, pad_states))),
         # [S]
         initial_state_distribution=jnp.pad(p.initial_state_distribution, (0, pad_states)),
         # [S] — padded states are non-terminal (0)
@@ -111,7 +110,6 @@ if __name__ == "__main__":
     print("stacked transition:           ", stacked_params.transition.shape)
     print("stacked observation:          ", stacked_params.observation.shape)
     print("stacked reward:               ", stacked_params.reward.shape)
-    print("stacked initial_belief_states:", stacked_params.initial_belief_states.shape)
     print("stacked initial_state_dist:   ", stacked_params.initial_state_distribution.shape)
     print("stacked terminal_mask:        ", stacked_params.terminal_mask.shape)
     print("num game types:               ", len(optimal_policies))

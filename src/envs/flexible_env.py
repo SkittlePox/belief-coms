@@ -39,9 +39,22 @@ class FlexibleEnvParams:
         reward       R_i(s, a0, a1, s')        shape [N, S, A, A, S]
 
     ``num_states`` / ``num_actions`` record the *real* (pre-padding) cardinality
-    so consumers can mask the zero-padded tail. ``initial_belief_states`` is
-    indexed [role, S]. ``initial_state_distribution`` [S] is the prior over the
-    true world state at reset. ``terminal_mask`` [S] is 1 on terminal states.
+    so consumers can mask the zero-padded tail. ``initial_state_distribution``
+    [S] is the prior over the true world state at reset, and it is also every
+    agent's prior belief. ``terminal_mask`` [S] is 1 on terminal states.
+
+    There is deliberately no per-role initial belief. Every agent starts from
+    ``initial_state_distribution``, and so does every level of a nested belief
+    hierarchy: my prior estimate of your belief, and of your estimate of mine, are
+    all the same distribution. (That is the law of total expectation -- averaging a
+    posterior over its own prior predictive returns the prior -- so a per-role field
+    could only ever hold a copy of this one.) Agents diverge the moment reset emits
+    observations, not before; see tools.belief_representations.initial_belief.
+
+    Information asymmetry belongs in the OBSERVATION function, not the prior: to
+    give one agent privileged knowledge of the state, let it observe the state. An
+    agent whose prior differs from ``initial_state_distribution`` is not better
+    informed, it is simply wrong about the world.
 
     When stacked across game types (see factory.assemble_environments) every
     field gains a leading game-type axis.
@@ -52,8 +65,7 @@ class FlexibleEnvParams:
     reward: chex.Array
     num_actions: chex.Array
     num_states: chex.Array
-    initial_belief_states: chex.Array       # [num_roles, S]
-    initial_state_distribution: chex.Array  # [S]
+    initial_state_distribution: chex.Array  # [S], the world prior AND every agent's prior
     terminal_mask: chex.Array               # [S], 1 on terminal states
 
 

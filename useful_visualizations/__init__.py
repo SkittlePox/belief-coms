@@ -1,6 +1,6 @@
 """Useful visualizations for the belief-coms environment.
 
-Run a single view (from ``src/``):
+Run a single view (from the repo root):
 
     uv run python -m useful_visualizations.viz_distributions
     uv run python -m useful_visualizations.viz_guessing_game
