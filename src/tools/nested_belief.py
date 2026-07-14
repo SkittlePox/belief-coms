@@ -143,6 +143,7 @@ def _write_and_import(src: str, build_id: str):
 # transition and observation.
 # --------------------------------------------------------------------------- #
 
+
 def _names(owner_is_ego: bool, top_level: bool):
     """Variable names in one frame. Always keyed to ROLE, never to whose mind we are in,
     so TR and OBS take the same argument order at every nesting level.
@@ -154,14 +155,13 @@ def _names(owner_is_ego: bool, top_level: bool):
     """
     own_act = "pa" if owner_is_ego else "pb"
     opp_act = "pb" if owner_is_ego else "pa"
-    own_action = "a_ego" if top_level else own_act   # the ego knows what it actually did
+    own_action = "a_ego" if top_level else own_act  # the ego knows what it actually did
     return dict(
         own_action=own_action,
         opp_act=opp_act,
         opp_obs="oy" if owner_is_ego else "ox",
         # TR/OBS always take (ego-role thing, other-role thing) in that order.
-        joint=(f"{own_action}, opp.{opp_act}" if owner_is_ego
-               else f"opp.{opp_act}, {own_action}"),
+        joint=(f"{own_action}, opp.{opp_act}" if owner_is_ego else f"opp.{opp_act}, {own_action}"),
     )
 
 
@@ -178,8 +178,7 @@ def _belief_args(num_states: int) -> str:
     return ", ".join(f"E[w.s == {s}]" for s in range(num_states))
 
 
-def _phase_a(level: int, depth: int, owner_is_ego: bool, indent: str, num_states: int,
-             top_level: bool = False) -> list[str]:
+def _phase_a(level: int, depth: int, owner_is_ego: bool, indent: str, num_states: int, top_level: bool = False) -> list[str]:
     """Priors and actions, from this level all the way down."""
     n = _names(owner_is_ego, top_level)
     out = [
@@ -196,8 +195,7 @@ def _phase_a(level: int, depth: int, owner_is_ego: bool, indent: str, num_states
         out.append(f"{indent}opp: thinks[")
         out.extend(_phase_a(level + 1, depth, not owner_is_ego, indent + "    ", num_states))
         out.append(f"{indent}],")
-        out.append(f"{indent}opp: chooses({n['opp_act']} in Ac, "
-                   f"wpp=POL{level + 1}({_belief_args(num_states)}, {n['opp_act']})),")
+        out.append(f"{indent}opp: chooses({n['opp_act']} in Ac, " f"wpp=POL{level + 1}({_belief_args(num_states)}, {n['opp_act']})),")
     else:
         # The bottom. Someone has to stop, and here the opponent gets no mind. Push this
         # further away by raising `depth`.
@@ -205,8 +203,7 @@ def _phase_a(level: int, depth: int, owner_is_ego: bool, indent: str, num_states
     return out
 
 
-def _phase_b(level: int, depth: int, owner_is_ego: bool, indent: str,
-             top_level: bool = False) -> list[str]:
+def _phase_b(level: int, depth: int, owner_is_ego: bool, indent: str, top_level: bool = False) -> list[str]:
     """Transitions and observations, from this level all the way down."""
     n = _names(owner_is_ego, top_level)
     out: list[str] = []
@@ -224,8 +221,7 @@ def _phase_b(level: int, depth: int, owner_is_ego: bool, indent: str,
         out.append(f"{indent}w: knows({n['own_action']}),")
     out.append(f"{indent}w: knows(opp.{n['opp_act']}),")
     out.append(f"{indent}w: chooses(s_ in S, wpp=TR(s, {n['joint']}, s_)),")
-    out.append(f"{indent}w: chooses(ox in Ob, oy in Ob, "
-               f"wpp=OBS(ox, oy, s_, {n['joint']})),")
+    out.append(f"{indent}w: chooses(ox in Ob, oy in Ob, " f"wpp=OBS(ox, oy, s_, {n['joint']})),")
 
     if level < depth:
         # The opponent sees its own observation -- and only its own. This is the asymmetry
@@ -236,8 +232,7 @@ def _phase_b(level: int, depth: int, owner_is_ego: bool, indent: str,
     return out
 
 
-def _init_mind(level: int, depth: int, owner_is_ego: bool, indent: str,
-               top_level: bool = False) -> list[str]:
+def _init_mind(level: int, depth: int, owner_is_ego: bool, indent: str, top_level: bool = False) -> list[str]:
     """The reset step: a prior and an observation, no action and no transition.
 
     Seeding the tower matters and is easy to botch. At t=0 the other agent has ALREADY
@@ -288,8 +283,7 @@ def _model_src(depth: int, num_states: int, build_id: str) -> str:
         f"def step[st: S](a_ego, o_ego{belief_params}):",
         "    ego: knows(st)",
         "    ego: thinks[",
-        *_phase_a(0, depth, owner_is_ego=True, indent=" " * 8, num_states=num_states,
-                  top_level=True),
+        *_phase_a(0, depth, owner_is_ego=True, indent=" " * 8, num_states=num_states, top_level=True),
         *_phase_b(0, depth, owner_is_ego=True, indent=" " * 8, top_level=True),
         "    ]",
         # The ego knows what it saw. Its own action is already the constant a_ego, and
@@ -322,9 +316,11 @@ def _model_src(depth: int, num_states: int, build_id: str) -> str:
 
 # --------------------------------------------------------------------------- #
 
+
 @dataclass
 class NestedBeliefStep:
     """One in-place step of the nested belief tower, compiled for one (env, role, depth)."""
+
     module: object
     ego_role: int
     depth: int
@@ -377,11 +373,12 @@ def _as_memo_policy(policy, num_states: int) -> Callable:
     be anything jittable -- softmax over Q, argmax, a neural net. It does not have to be
     linear in the belief, and it does not have to be differentiable in a nice way.
     """
+
     @jax.jit
     def memo_policy(*args):
         belief = jnp.stack(args[:num_states])
         action = args[num_states]
-        belief = belief / jnp.clip(jnp.sum(belief), 1e-12)   # memo hands us E[...] terms
+        belief = belief / jnp.clip(jnp.sum(belief), 1e-12)  # memo hands us E[...] terms
         return policy(distrax.Categorical(probs=belief)).probs[action]
 
     return memo_policy
@@ -437,8 +434,7 @@ def build_nested_belief_step(
         raise ValueError("depth must be >= 1 to represent the other agent's belief at all")
     if ego_role not in (0, 1):
         raise ValueError("ego_role must be 0 or 1")
-    if (policies is None and policy_weight is None
-            and int(env_params.num_actions) != int(env_params.num_states)):
+    if policies is None and policy_weight is None and int(env_params.num_actions) != int(env_params.num_states):
         # Left to itself, 1[s == a] would quietly give some states no action at all (and
         # some actions no state), and every level of the tower would be built on a policy
         # that means nothing. Fail instead of returning a confident wrong answer.
@@ -463,6 +459,7 @@ def build_nested_belief_step(
     # opponent a mistaken model of you.
     if policies is None:
         if policy_weight is None:
+
             @jax.jit
             def policy_weight(role, s, a):  # noqa: F811 -- probability matching
                 del role
@@ -470,25 +467,21 @@ def build_nested_belief_step(
 
         def _from_weight(role):
             def pi(belief: "distrax.Categorical") -> "distrax.Categorical":
-                weights = jax.vmap(
-                    lambda a: jnp.sum(jax.vmap(
-                        lambda s: belief.probs[s] * policy_weight(role, s, a)
-                    )(jnp.arange(num_states)))
-                )(jnp.arange(num_actions))
+                weights = jax.vmap(lambda a: jnp.sum(jax.vmap(lambda s: belief.probs[s] * policy_weight(role, s, a))(jnp.arange(num_states))))(
+                    jnp.arange(num_actions)
+                )
                 return distrax.Categorical(probs=weights / jnp.sum(weights))
+
             return pi
 
         by_role = (_from_weight(0), _from_weight(1))
         policy_for_level = lambda k: by_role[ego_role if k % 2 == 0 else other_role]
-    elif len(policies) == depth + 1:                   # by level
+    elif len(policies) == depth + 1:  # by level
         policy_for_level = lambda k: policies[k]
-    elif len(policies) == 2:                           # by role
+    elif len(policies) == 2:  # by role
         policy_for_level = lambda k: policies[ego_role if k % 2 == 0 else other_role]
     else:
-        raise ValueError(
-            f"policies must be a 2-tuple (by role) or a list of {depth + 1} (by level), "
-            f"got {len(policies)}"
-        )
+        raise ValueError(f"policies must be a 2-tuple (by role) or a list of {depth + 1} (by level), " f"got {len(policies)}")
 
     def _order(ego_thing, other_thing):
         return (ego_thing, other_thing) if ego_role == 0 else (other_thing, ego_thing)
@@ -533,7 +526,11 @@ def build_nested_belief_step(
         S=jnp.arange(num_states),
         Ac=jnp.arange(num_actions),
         Ob=jnp.arange(num_observations),
-        P0=P0, PRIOR=PRIOR, TR=TR, OBS=OBS, OBS_RESET=OBS_RESET,
+        P0=P0,
+        PRIOR=PRIOR,
+        TR=TR,
+        OBS=OBS,
+        OBS_RESET=OBS_RESET,
         **{f"POL{k}": level_policies[k] for k in range(1, depth + 1)},
     )
 

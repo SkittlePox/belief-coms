@@ -48,9 +48,7 @@ def _belief_by_waiting(params, true_state=0, n_waits=12, seed=0):
     for _ in range(n_waits):
         key, obs_key = jax.random.split(key)
         obs = distrax.Categorical(probs=presser_obs_dist).sample(seed=obs_key)
-        belief = belief_factory.update_with_observation_and_joint_action(
-            belief, obs, wait_joint_action, agent_id=0
-        )
+        belief = belief_factory.update_with_observation_and_joint_action(belief, obs, wait_joint_action, agent_id=0)
         frames.append((np.asarray(belief.probs), int(obs)))
         if belief.probs[true_state] > 0.999:
             break
@@ -64,9 +62,9 @@ def render() -> str:
     O = params.observation.shape[-1]
     done = S - 1
 
-    T = np.asarray(params.transition)          # [S, A, A, S]
-    R = np.asarray(params.reward)              # [N, S, A, A, S]
-    Obs = np.asarray(params.observation)       # [S, A, A, O, O]
+    T = np.asarray(params.transition)  # [S, A, A, S]
+    R = np.asarray(params.reward)  # [N, S, A, A, S]
+    Obs = np.asarray(params.observation)  # [S, A, A, O, O]
 
     # Transition: next state s' for each (s, a0), with a1 inert (fixed at 0).
     next_state = T[:, :, 0, :].argmax(axis=-1).astype(float)  # [S, A]
@@ -79,12 +77,15 @@ def render() -> str:
     obs_joint = Obs[joint_state, 0, 0]  # [O, O]
 
     fig = make_subplots(
-        rows=2, cols=3,
+        rows=2,
+        cols=3,
         specs=[
             [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
             [{"type": "xy"}, {"colspan": 2, "type": "xy"}, None],
         ],
-        row_heights=[0.5, 0.5], vertical_spacing=0.17, horizontal_spacing=0.09,
+        row_heights=[0.5, 0.5],
+        vertical_spacing=0.17,
+        horizontal_spacing=0.09,
         subplot_titles=(
             "transition  T:  next state s'  (a1 inert;  a0==s → done)",
             "reward  R(s, a0):  +1 hit / −1 miss / −0.1 wait / 0 done",
@@ -101,34 +102,66 @@ def render() -> str:
     # Transition next-state grid (color by next-state index; text is the index).
     fig.add_trace(
         F.heatmap_trace(
-            next_state, x=action_labels, y=state_labels, colorscale=F.PROB_SCALE,
-            zmin=0, zmax=S - 1, text=True, text_fmt="s'={:.0f}", showscale=False, hover="next s'",
+            next_state,
+            x=action_labels,
+            y=state_labels,
+            colorscale=F.PROB_SCALE,
+            zmin=0,
+            zmax=S - 1,
+            text=True,
+            text_fmt="s'={:.0f}",
+            showscale=False,
+            hover="next s'",
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
     # Reward grid (diverging).
     fig.add_trace(
         F.heatmap_trace(
-            reward_grid, x=action_labels, y=state_labels, colorscale=F.REWARD_SCALE,
-            zmin=-1, zmax=1, text=True, text_fmt="{:+.1f}", showscale=False, hover="reward",
+            reward_grid,
+            x=action_labels,
+            y=state_labels,
+            colorscale=F.REWARD_SCALE,
+            zmin=-1,
+            zmax=1,
+            text=True,
+            text_fmt="{:+.1f}",
+            showscale=False,
+            hover="reward",
         ),
-        row=1, col=2,
+        row=1,
+        col=2,
     )
     # Observation marginal.
     fig.add_trace(
         F.heatmap_trace(
-            obs_marg, x=symbol_labels, y=state_labels, colorscale=F.PROB_SCALE,
-            zmin=0, zmax=1, showscale=False, hover="P(o|s')",
+            obs_marg,
+            x=symbol_labels,
+            y=state_labels,
+            colorscale=F.PROB_SCALE,
+            zmin=0,
+            zmax=1,
+            showscale=False,
+            hover="P(o|s')",
         ),
-        row=1, col=3,
+        row=1,
+        col=3,
     )
     # Joint observation for state 0.
     fig.add_trace(
         F.heatmap_trace(
-            obs_joint, x=[f"o1={o}" for o in range(O)], y=[f"o0={o}" for o in range(O)],
-            colorscale=F.PROB_SCALE, zmin=0, zmax=obs_joint.max(), showscale=False, hover="P(o0,o1|s')",
+            obs_joint,
+            x=[f"o1={o}" for o in range(O)],
+            y=[f"o0={o}" for o in range(O)],
+            colorscale=F.PROB_SCALE,
+            zmin=0,
+            zmax=obs_joint.max(),
+            showscale=False,
+            hover="P(o0,o1|s')",
         ),
-        row=2, col=1,
+        row=2,
+        col=1,
     )
 
     # Belief-by-waiting rollout: one animated bar trace (added last).
@@ -136,7 +169,8 @@ def render() -> str:
     belief_trace_idx = len(fig.data)
     fig.add_trace(
         F.bar_trace(rollout[0][0], state_labels, color=F.ACCENT_2),
-        row=2, col=2,
+        row=2,
+        col=2,
     )
 
     # Row-0-on-top for the grids; belief bar on a probability axis.

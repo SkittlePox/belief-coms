@@ -112,12 +112,8 @@ class ActorCriticBeliefAgent(nn.Module):
 
     @nn.compact
     def __call__(self, previous_belief, utterance):
-        pi = BeliefActor(
-            input_utterance_shape=self.input_utterance_shape, belief_dim=self.belief_dim
-        )(previous_belief, utterance)
-        value = BeliefCritic(
-            input_utterance_shape=self.input_utterance_shape, belief_dim=self.belief_dim
-        )(previous_belief, utterance)
+        pi = BeliefActor(input_utterance_shape=self.input_utterance_shape, belief_dim=self.belief_dim)(previous_belief, utterance)
+        value = BeliefCritic(input_utterance_shape=self.input_utterance_shape, belief_dim=self.belief_dim)(previous_belief, utterance)
         return pi, value
 
 
@@ -128,15 +124,11 @@ if __name__ == "__main__":
     belief_dim = 16
     batch_size = 4
 
-    agent = ActorCriticBeliefAgent(
-        input_utterance_shape=input_shape, belief_dim=belief_dim
-    )
+    agent = ActorCriticBeliefAgent(input_utterance_shape=input_shape, belief_dim=belief_dim)
     key = jax.random.PRNGKey(0)
 
     utterance = jax.random.uniform(key, shape=(batch_size, *input_shape))
-    previous_belief = jax.random.dirichlet(
-        key, alpha=jnp.ones(belief_dim), shape=(batch_size,)
-    )
+    previous_belief = jax.random.dirichlet(key, alpha=jnp.ones(belief_dim), shape=(batch_size,))
 
     params = agent.init(key, previous_belief, utterance)
     pi, value = agent.apply(params, previous_belief, utterance)
@@ -148,9 +140,7 @@ if __name__ == "__main__":
     print("Sample shape:", samples.shape)  # (batch_size, belief_dim)
     print("Value shape:", value.shape)  # (batch_size,)
     print("Sample sums (should all be ~1.0):", sample_sums)
-    assert jnp.allclose(
-        sample_sums, jnp.ones(batch_size), atol=1e-5
-    ), "Samples do not sum to 1!"
+    assert jnp.allclose(sample_sums, jnp.ones(batch_size), atol=1e-5), "Samples do not sum to 1!"
     print("All samples sum to 1. ✓")
     print("Sample belief state (first):", samples[0])
     print("Critic value (first):", value[0])

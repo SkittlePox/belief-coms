@@ -2,9 +2,11 @@ import distrax, chex, jax
 from jax.experimental import checkify
 import jax.numpy as jnp
 from functools import partial
+
 # from typing import Optional, Array, Union, Any
 
-class JointCategoricalPair():
+
+class JointCategoricalPair:
     """Represents a joint distribution over two categorical variables.
 
     The joint distribution is stored internally as a flat `distrax.Categorical`
@@ -171,4 +173,3 @@ if __name__ == "__main__":
 
     # Sample a (var1, var2) pair from the joint. Should return [0, 1] or [0, 2].
     print(factory.sample_joint_distribution(key, distrax.Categorical(probs=initial_probs)))
-

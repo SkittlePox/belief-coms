@@ -57,7 +57,7 @@ def test_the_tower_alternates_perspective():
     it -- and neither is bel[2], their estimate of my belief.
     """
     model = build_nested_belief_step(PARAMS, ego_role=0, depth=2)
-    tower = model.initial_tower(1)   # the ego saw symbol 1, so it rules out state 1
+    tower = model.initial_tower(1)  # the ego saw symbol 1, so it rules out state 1
 
     np.testing.assert_allclose(tower[0], [0.5, 0.0, 0.5, 0.0], atol=1e-4)
     # They did not see symbol 1, so they cannot have ruled out state 1...
@@ -108,10 +108,10 @@ def test_off_policy_histories_drift_silently():
     behaviour is on the record.
     """
     model = build_nested_belief_step(PARAMS, ego_role=0, depth=2)
-    tower = run_tower(model, [1, 2, 2], [WAIT, WAIT])   # off-policy: the presser never waits
+    tower = run_tower(model, [1, 2, 2], [WAIT, WAIT])  # off-policy: the presser never waits
 
     for belief in tower:
-        assert np.isclose(belief.sum(), 1.0)   # no complaint, no NaN, no zero mass
+        assert np.isclose(belief.sum(), 1.0)  # no complaint, no NaN, no zero mass
 
 
 def test_initial_tower_uses_the_reset_observation():
@@ -171,12 +171,10 @@ def test_runs_on_an_arbitrary_flexible_env():
     @jax.jit
     def policy_weight(role, s, a):
         # jnp, not np: role/s/a arrive as traced indices.
-        w = jnp.array([[[0.8, 0.2], [0.2, 0.8], [0.5, 0.5]],
-                       [[0.3, 0.7], [0.7, 0.3], [0.5, 0.5]]])
+        w = jnp.array([[[0.8, 0.2], [0.2, 0.8], [0.5, 0.5]], [[0.3, 0.7], [0.7, 0.3], [0.5, 0.5]]])
         return w[role, s, a]
 
-    model = build_nested_belief_step(params, ego_role=0, depth=2,
-                                     policy_weight=policy_weight)
+    model = build_nested_belief_step(params, ego_role=0, depth=2, policy_weight=policy_weight)
     tower = run_tower(model, [0, 1, 0], [0, 1])
 
     assert len(tower) == 3

@@ -219,14 +219,16 @@ def render() -> str:
     emp = counts / counts.sum()
 
     fig = make_subplots(
-        rows=3, cols=3,
+        rows=3,
+        cols=3,
         specs=[
             [{"colspan": 3}, None, None],
             [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
             [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
         ],
         row_heights=[0.22, 0.39, 0.39],
-        vertical_spacing=0.13, horizontal_spacing=0.09,
+        vertical_spacing=0.13,
+        horizontal_spacing=0.09,
         subplot_titles=(
             "flat distrax.Categorical  —  probs[i],  i = var1·5 + var2   (row-major)",
             "joint grid  P(var1, var2)  =  probs.reshape(3, 5)",
@@ -241,20 +243,34 @@ def render() -> str:
     # Trace 0: flat vector (1-row heatmap over the 15 flat indices).
     fig.add_trace(
         F.heatmap_trace(
-            probs[None, :], x=[str(i) for i in range(V1 * V2)], y=["p"],
-            colorscale=F.PROB_SCALE, zmin=0.0, zmax=probs.max(), showscale=False,
-            hover="prob", dynamic_text=True,
+            probs[None, :],
+            x=[str(i) for i in range(V1 * V2)],
+            y=["p"],
+            colorscale=F.PROB_SCALE,
+            zmin=0.0,
+            zmax=probs.max(),
+            showscale=False,
+            hover="prob",
+            dynamic_text=True,
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
     # Trace 1: the joint grid.
     fig.add_trace(
         F.heatmap_trace(
-            grid, x=[f"v2={j}" for j in range(V2)], y=[f"v1={i}" for i in range(V1)],
-            colorscale=F.PROB_SCALE, zmin=0.0, zmax=grid.max(), showscale=False,
-            hover="prob", dynamic_text=True,
+            grid,
+            x=[f"v2={j}" for j in range(V2)],
+            y=[f"v1={i}" for i in range(V1)],
+            colorscale=F.PROB_SCALE,
+            zmin=0.0,
+            zmax=grid.max(),
+            showscale=False,
+            hover="prob",
+            dynamic_text=True,
         ),
-        row=2, col=1,
+        row=2,
+        col=1,
     )
     # Traces 2 & 3: the two marginals.
     fig.add_trace(F.bar_trace(marg_v1, [f"v1={i}" for i in range(V1)], dynamic_text=True), row=2, col=2)
@@ -263,15 +279,23 @@ def render() -> str:
     # Trace 4: conditional. Trace 5: empirical grid.
     fig.add_trace(
         F.bar_trace(cond_v2_given_v1_0, [f"v2={j}" for j in range(V2)], color=F.ACCENT_2, dynamic_text=True),
-        row=3, col=1,
+        row=3,
+        col=1,
     )
     fig.add_trace(
         F.heatmap_trace(
-            emp, x=[f"v2={j}" for j in range(V2)], y=[f"v1={i}" for i in range(V1)],
-            colorscale=F.PROB_SCALE, zmin=0.0, zmax=grid.max(), showscale=False,
-            hover="freq", dynamic_text=True,
+            emp,
+            x=[f"v2={j}" for j in range(V2)],
+            y=[f"v1={i}" for i in range(V1)],
+            colorscale=F.PROB_SCALE,
+            zmin=0.0,
+            zmax=grid.max(),
+            showscale=False,
+            hover="freq",
+            dynamic_text=True,
         ),
-        row=3, col=2,
+        row=3,
+        col=2,
     )
 
     fig.update_yaxes(autorange="reversed", row=2, col=1)

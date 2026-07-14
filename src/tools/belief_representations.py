@@ -5,10 +5,10 @@ import jax.numpy as jnp
 from functools import partial
 from .distributions import *
 
-class CategoricalBeliefState:
-    """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution.
 
-    """
+class CategoricalBeliefState:
+    """Represents a belief over a set of possible underlying states. States are assumed to be categorical, so a belief can be represented by a single distrax categorical distribution."""
+
     def __init__(self, env_params):
         """Build a belief-update engine for a single DecPOMDP.
 
@@ -52,14 +52,8 @@ class CategoricalBeliefState:
             lambda _: (other_action, ego_action),
             None,
         )
-    
-    def update_with_observation_and_joint_action(
-        self, 
-        belief_distribution: distrax.Categorical, 
-        observation, 
-        previous_joint_action,
-        agent_id = 0
-    ):
+
+    def update_with_observation_and_joint_action(self, belief_distribution: distrax.Categorical, observation, previous_joint_action, agent_id=0):
         """Perform a Bayesian belief update given a new observation.
 
         Implements the standard POMDP belief update rule:
@@ -67,10 +61,10 @@ class CategoricalBeliefState:
             b'(s') ∝ O(o | a, s') ∑_s T(s' | s, a) b(s)
 
         where:
-          - b(s)  is the prior belief (probability of being in state s)
-          - T(s' | s, a) is the transition model (probability of moving to s' from s under joint action a)
-          - O(o | a, s') is the observation model (probability of observing o in state s' after action a)
-          - b'(s') is the unnormalized posterior belief over next states s'
+        - b(s)  is the prior belief (probability of being in state s)
+        - T(s' | s, a) is the transition model (probability of moving to s' from s under joint action a)
+        - O(o | a, s') is the observation model (probability of observing o in state s' after action a)
+        - b'(s') is the unnormalized posterior belief over next states s'
 
         The result is renormalized by distrax.Categorical to form a valid distribution.
 
@@ -102,7 +96,7 @@ class CategoricalBeliefState:
                 agent_id == 0,
                 lambda _: self.joint_factory.marginalize_var2(joint_obs),
                 lambda _: self.joint_factory.marginalize_var1(joint_obs),
-                None
+                None,
             )
 
             return marginal_obs.prob(observation) * predicted_prior
@@ -111,13 +105,13 @@ class CategoricalBeliefState:
         return distrax.Categorical(probs=probs)
 
     def update_with_observation_only(
-        self, 
-        ego_belief_distribution: distrax.Categorical, 
-        other_belief_distribution_estimate: distrax.Categorical, 
-        ego_observation, 
-        previous_ego_action, 
+        self,
+        ego_belief_distribution: distrax.Categorical,
+        other_belief_distribution_estimate: distrax.Categorical,
+        ego_observation,
+        previous_ego_action,
         other_optimal_policy,
-        agent_id = 0
+        agent_id=0,
     ):
         """Perform a Bayesian belief update when the other agent's action is unobserved.
 
@@ -160,7 +154,7 @@ class CategoricalBeliefState:
                     agent_id == 0,
                     lambda _: self.joint_factory.marginalize_var2(joint_obs),
                     lambda _: self.joint_factory.marginalize_var1(joint_obs),
-                    None
+                    None,
                 )
                 obs_likelihood = marginal_obs.prob(ego_observation)
 
@@ -180,8 +174,8 @@ class CategoricalBeliefState:
     def initial_belief(
         self,
         ego_observation,
-        agent_id = 0,       # This is the ego agent's id!
-        reset_action = 0,
+        agent_id=0,  # This is the ego agent's id!
+        reset_action=0,
     ):
         """The ego agent's own belief at t=0, from the reset observation.
 
@@ -208,8 +202,7 @@ class CategoricalBeliefState:
                 lambda _: self.joint_factory.marginalize_var1(joint_obs),
                 None,
             )
-            return (marginal_obs.prob(ego_observation)
-                    * self.env_params.initial_state_distribution[state])
+            return marginal_obs.prob(ego_observation) * self.env_params.initial_state_distribution[state]
 
         probs = jax.vmap(state_likelihood)(states)
         return distrax.Categorical(probs=probs / jnp.sum(probs))
@@ -217,8 +210,8 @@ class CategoricalBeliefState:
     def initial_other_belief_estimate(
         self,
         ego_observation,
-        agent_id = 0,       # This is the ego agent's id!
-        reset_action = 0,
+        agent_id=0,  # This is the ego agent's id!
+        reset_action=0,
     ):
         """The ego's estimate of the other agent's belief at t=0, from the reset observation.
 
@@ -245,9 +238,7 @@ class CategoricalBeliefState:
 
         def observation_rows(state):
             joint_obs = self.joint_observation_function(state, joint_action)
-            grid = joint_obs.probs.reshape(
-                self.num_unique_observations, self.num_unique_observations
-            )
+            grid = joint_obs.probs.reshape(self.num_unique_observations, self.num_unique_observations)
             joint_with_ego = jax.lax.cond(
                 agent_id == 0,
                 lambda _: grid[ego_observation, :],
@@ -262,15 +253,15 @@ class CategoricalBeliefState:
             )
             return joint_with_ego, other_marginal
 
-        joint_with_ego, other_marginal = jax.vmap(observation_rows)(states)   # (S, O) each
+        joint_with_ego, other_marginal = jax.vmap(observation_rows)(states)  # (S, O) each
 
-        weights = prior @ joint_with_ego                                      # (O,)
+        weights = prior @ joint_with_ego  # (O,)
 
-        posteriors = (prior[:, None] * other_marginal).T                      # (O, S)
+        posteriors = (prior[:, None] * other_marginal).T  # (O, S)
         mass = jnp.sum(posteriors, axis=1, keepdims=True)
         posteriors = posteriors / jnp.where(mass > 0, mass, 1.0)
 
-        unnormalized = weights @ posteriors                                   # (S,)
+        unnormalized = weights @ posteriors  # (S,)
         total = jnp.sum(unnormalized)
         probs = jnp.where(total > 0, unnormalized / jnp.where(total > 0, total, 1.0), prior)
         return distrax.Categorical(probs=probs)
@@ -282,9 +273,9 @@ class CategoricalBeliefState:
         ego_observation,
         previous_ego_action,
         other_optimal_policy,
-        agent_id = 0,   # This is the ego agent's id!
-        ego_action_prior = None,
-        mode = "mixture",
+        agent_id=0,  # This is the ego agent's id!
+        ego_action_prior=None,
+        mode="mixture",
     ):
         """Update the ego agent's *mean-belief estimate* of the other agent's belief.
 
@@ -442,25 +433,24 @@ class CategoricalBeliefState:
 
         def transition_prior(belief, joint_action):
             """∑_s T(s' | s, a) belief(s), as a vector over s'."""
-            return jax.vmap(lambda next_state: jnp.sum(jax.vmap(
-                lambda state: self.joint_transition_function(state, joint_action).prob(next_state)
-                * belief.prob(state)
-            )(states)))(states)
+            return jax.vmap(
+                lambda next_state: jnp.sum(
+                    jax.vmap(lambda state: self.joint_transition_function(state, joint_action).prob(next_state) * belief.prob(state))(states)
+                )
+            )(states)
 
         def observation_rows(next_state, joint_action):
             joint_obs = self.joint_observation_function(next_state, joint_action)
             # Row-major (var1 = agent 0's obs, var2 = agent 1's obs), per
             # JointCategoricalPair and FlexibleEnv.get_obs.
-            grid = joint_obs.probs.reshape(
-                self.num_unique_observations, self.num_unique_observations
-            )
+            grid = joint_obs.probs.reshape(self.num_unique_observations, self.num_unique_observations)
             # P(o_ego, o_other | s', a) with the ego's ACTUAL observation pinned, as a
             # function of o_other. This term carries the ego's private information into
             # its guess about what the other agent saw.
             joint_with_ego = jax.lax.cond(
                 agent_id == 0,
-                lambda _: grid[ego_observation, :],   # ego is var1, so o_other is var2
-                lambda _: grid[:, ego_observation],   # ego is var2, so o_other is var1
+                lambda _: grid[ego_observation, :],  # ego is var1, so o_other is var2
+                lambda _: grid[:, ego_observation],  # ego is var2, so o_other is var1
                 None,
             )
             # O_other(o_other | s', a): the other agent's own marginal likelihood.
@@ -475,12 +465,10 @@ class CategoricalBeliefState:
 
         def as_if_other_took_action(other_action):
             # --- OUR side. We know our own action, so we condition on it. ---
-            actual_joint = self.joint_action_constructor(
-                agent_id, previous_ego_action, other_action)
+            actual_joint = self.joint_action_constructor(agent_id, previous_ego_action, other_action)
 
             predicted_ego = transition_prior(ego_belief_distribution, actual_joint)  # (S',)
-            joint_with_ego, _ = jax.vmap(
-                lambda s_: observation_rows(s_, actual_joint))(states)               # (S', O)
+            joint_with_ego, _ = jax.vmap(lambda s_: observation_rows(s_, actual_joint))(states)  # (S', O)
 
             # 3. How likely each o_other is, jointly with the o_ego we actually saw:
             #       ∑_{s'} pred_ego(s') · O(o_ego, o_other | s', a)
@@ -489,7 +477,7 @@ class CategoricalBeliefState:
             #    only channel by which the ego's private knowledge reaches the estimate.
             #    Unnormalized -- normalization happens once, jointly over (a_other,
             #    o_other), below, so o_ego is also allowed to be evidence about their ACTION.
-            observation_weights = predicted_ego @ joint_with_ego                     # (O,)
+            observation_weights = predicted_ego @ joint_with_ego  # (O,)
 
             # --- THEIR side. They never saw our action, so they must NOT condition on it. ---
             # This is the asymmetry that makes the whole thing subtle. If we press button 0,
@@ -497,29 +485,26 @@ class CategoricalBeliefState:
             # posterior under our actual action would rule out a state they still believe
             # in. So their prior marginalizes over what we might have done.
             def under_hypothetical_ego_action(hypothetical_ego_action):
-                joint = self.joint_action_constructor(
-                    agent_id, hypothetical_ego_action, other_action)
+                joint = self.joint_action_constructor(agent_id, hypothetical_ego_action, other_action)
                 predicted = transition_prior(other_belief_distribution_estimate, joint)  # (S',)
-                _, other_marginal = jax.vmap(
-                    lambda s_: observation_rows(s_, joint))(states)                      # (S', O)
+                _, other_marginal = jax.vmap(lambda s_: observation_rows(s_, joint))(states)  # (S', O)
                 # Their unnormalized posterior mass, per (o_other, s'), for this hypothesis.
-                return (predicted[:, None] * other_marginal).T                           # (O, S')
+                return (predicted[:, None] * other_marginal).T  # (O, S')
 
             # 4. Their posterior had they seen o_other, marginalizing our unseen action:
             #       b_{a,o}(s') ∝ ∑_{a_ego'} P(a_ego') · pred_{a_ego'}(s') · O_other(o | s', ·)
-            per_hypothesis = jax.vmap(under_hypothetical_ego_action)(actions)   # (A_ego, O, S')
-            posteriors = jnp.einsum("h,hos->os", ego_action_prior, per_hypothesis)   # (O, S')
+            per_hypothesis = jax.vmap(under_hypothetical_ego_action)(actions)  # (A_ego, O, S')
+            posteriors = jnp.einsum("h,hos->os", ego_action_prior, per_hypothesis)  # (O, S')
             mass = jnp.sum(posteriors, axis=1, keepdims=True)
             normalized = posteriors / jnp.where(mass > 0, mass, 1.0)
 
             return observation_weights, normalized, posteriors
 
         # (A, O), (A, O, S), (A, O, S)
-        observation_weights, posteriors, unnormalized_posteriors = \
-            jax.vmap(as_if_other_took_action)(actions)
+        observation_weights, posteriors, unnormalized_posteriors = jax.vmap(as_if_other_took_action)(actions)
 
         # P(a_other, o_other | b̄, a_ego, o_ego), unnormalized.
-        weights = policy_probs[:, None] * observation_weights          # (A, O)
+        weights = policy_probs[:, None] * observation_weights  # (A, O)
 
         if mode == "mixture":
             # 5a. Average their POSTERIORS, each normalized first. This is the right shape

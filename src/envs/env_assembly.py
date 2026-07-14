@@ -92,9 +92,7 @@ def assemble_environments(specs: Sequence[EnvSpec]):
     target_actions = max(p.transition.shape[1] for p in params_list)
     target_obs = max(p.observation.shape[-1] for p in params_list)
 
-    padded = [
-        _pad_params(p, target_states, target_actions, target_obs) for p in params_list
-    ]
+    padded = [_pad_params(p, target_states, target_actions, target_obs) for p in params_list]
 
     # Stack matching leaves across game types -> leading game-type axis.
     stacked_params = jax.tree.map(lambda *leaves: jnp.stack(leaves), *padded)

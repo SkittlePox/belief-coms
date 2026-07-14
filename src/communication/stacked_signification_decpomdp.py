@@ -141,9 +141,7 @@ class StackedSignificationState:
     communication_round_iterator: (
         chex.Array
     )  # scalar int: round within the active block (0..total_num_rounds-1); advances once per completed (two-step) round
-    cumulative_communication_round_iterator: (
-        chex.Array
-    )  # scalar int: total step_env calls (two per who_speaks round); never resets
+    cumulative_communication_round_iterator: chex.Array  # scalar int: total step_env calls (two per who_speaks round); never resets
 
     # Two-stage rounds: each who_speaks round spans TWO step_env iterations. The
     # speaker emits an utterance on UTTERANCE_STAGE, then the listener emits a belief
@@ -217,18 +215,13 @@ class StackedSignificationDecPOMDP:
         self.optimal_policies = optimal_policies
         self.num_game_types = len(optimal_policies)
         self.num_roles = len(optimal_policies[0])
-        self._flat_policies = tuple(
-            optimal_policies[game_type][role]
-            for game_type in range(self.num_game_types)
-            for role in range(self.num_roles)
-        )
+        self._flat_policies = tuple(optimal_policies[game_type][role] for game_type in range(self.num_game_types) for role in range(self.num_roles))
 
         # One belief-update engine per game type, built from that type's (unstacked)
         # params. Cardinalities are uniform across types (padded), so each is valid.
         # Currently the reset belief updates use only type 0 (see note in reset).
         self._belief_factories = tuple(
-            CategoricalBeliefState(jax.tree.map(lambda leaf, t=game_type: leaf[t], all_env_parameters))
-            for game_type in range(self.num_game_types)
+            CategoricalBeliefState(jax.tree.map(lambda leaf, t=game_type: leaf[t], all_env_parameters)) for game_type in range(self.num_game_types)
         )
 
     def _agent_policy(self, game_type, role, belief_distribution: distrax.Categorical) -> distrax.Categorical:
@@ -305,9 +298,7 @@ class StackedSignificationDecPOMDP:
         its own inverse in a dyad. Same gather used in ``_step_underlying_env``.
         """
         game_role_to_agent = (
-            jnp.zeros((num_games, self.num_roles), dtype=jnp.int32)
-            .at[agent_game_assignment, agent_role_assignment]
-            .set(jnp.arange(self.num_agents))
+            jnp.zeros((num_games, self.num_roles), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(self.num_agents))
         )
         return game_role_to_agent[agent_game_assignment, 1 - agent_role_assignment]
 
@@ -389,9 +380,7 @@ class StackedSignificationDecPOMDP:
 
         # Map (game, role) -> agent index so we can assemble per-game joint actions.
         game_role_to_agent = (
-            jnp.zeros((num_games, self.num_roles), dtype=jnp.int32)
-            .at[agent_game_assignment, agent_role_assignment]
-            .set(jnp.arange(self.num_agents))
+            jnp.zeros((num_games, self.num_roles), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(self.num_agents))
         )
 
         # Each agent's dyadic partner (the agent in the other role of its game). Used to
@@ -404,9 +393,7 @@ class StackedSignificationDecPOMDP:
         action_key, transition_key, obs_key = jax.random.split(key, 3)
 
         # 1. Each agent samples an action from its optimal policy given its true belief.
-        agent_action_distributions = self.agent_action_distributions(
-            agent_game_types, agent_role_assignment, true_agent_belief_states
-        )
+        agent_action_distributions = self.agent_action_distributions(agent_game_types, agent_role_assignment, true_agent_belief_states)
         agent_actions = jax.vmap(lambda probs, k: distrax.Categorical(probs=probs).sample(seed=k))(
             agent_action_distributions, jax.random.split(action_key, self.num_agents)
         )  # [num_agents]
@@ -416,9 +403,7 @@ class StackedSignificationDecPOMDP:
         joint_a0, joint_a1 = game_actions_by_role[:, 0], game_actions_by_role[:, 1]
 
         # 3. Transition each game (gathers index the stacked params by per-game type).
-        next_state_probs = self.all_env_parameters.transition[
-            game_types_per_game, game_states, joint_a0, joint_a1
-        ]  # [num_games, S]
+        next_state_probs = self.all_env_parameters.transition[game_types_per_game, game_states, joint_a0, joint_a1]  # [num_games, S]
         game_next_states = jax.vmap(lambda probs, k: distrax.Categorical(probs=probs).sample(seed=k))(
             next_state_probs, jax.random.split(transition_key, num_games)
         )  # [num_games]
@@ -436,9 +421,7 @@ class StackedSignificationDecPOMDP:
         agent_rewards = game_rewards[agent_game_assignment, agent_role_assignment]  # [num_agents]
 
         # 4. Sample the joint observation and split it into the two roles' observations.
-        obs_probs = self.all_env_parameters.observation[
-            game_types_per_game, game_next_states, joint_a0, joint_a1
-        ]  # [num_games, O, O]
+        obs_probs = self.all_env_parameters.observation[game_types_per_game, game_next_states, joint_a0, joint_a1]  # [num_games, O, O]
         num_obs = obs_probs.shape[-1]
         flat_obs = jax.vmap(lambda probs, k: distrax.Categorical(probs=probs.reshape(-1)).sample(seed=k))(
             obs_probs, jax.random.split(obs_key, num_games)
@@ -534,9 +517,7 @@ class StackedSignificationDecPOMDP:
         # On the UTTERANCE_STAGE the utterance_actions have been freshly populated.
         # They need to be stored in the state so that get_obs can return them to the
         # corresponding listener agent next. NOTE: There is double-filtering going on here from two jnp.wheres, not sure it's necessary
-        speakers_utterances = jnp.where(
-            agent_speaks_binary_mask[:, None], utterance_actions, jnp.zeros_like(utterance_actions)
-        )
+        speakers_utterances = jnp.where(agent_speaks_binary_mask[:, None], utterance_actions, jnp.zeros_like(utterance_actions))
         # Later, we may care about keeping track of the previous utterances in future states
         # (using the field as persistent memory) so information can be aggregated across rounds:
         # next_agent_utterance_actions_unrendered = jnp.where(
@@ -568,9 +549,7 @@ class StackedSignificationDecPOMDP:
         # On the BELIEF_STAGE, belief_actions is freshly populated by listeners.
         # We will write those beliefs into the next ground truth belief states.
         update_listener_true_belief = on_belief_stage & agent_listens_binary_mask  # [num_agents]
-        next_true_agent_belief_states = jnp.where(
-            update_listener_true_belief[:, None], belief_actions, state.true_agent_belief_states
-        )
+        next_true_agent_belief_states = jnp.where(update_listener_true_belief[:, None], belief_actions, state.true_agent_belief_states)
 
         # === Substate: communication resolved, world not yet stepped ========
         # A plottable snapshot of the moment BETWEEN communication and the world step:
@@ -759,9 +738,7 @@ class StackedSignificationDecPOMDP:
         Thin wrapper over ``_step_env_impl`` that drops the pre-act substate, preserving the
         original (state, observation, rewards) contract for training and rollouts.
         """
-        _pre_act, state, obs, rewards = self._step_env_impl(
-            key, state, utterance_actions, belief_estimate_post_utterance, belief_actions
-        )
+        _pre_act, state, obs, rewards = self._step_env_impl(key, state, utterance_actions, belief_estimate_post_utterance, belief_actions)
         return state, obs, rewards
 
     def step_env_with_substate(
@@ -808,9 +785,7 @@ class StackedSignificationDecPOMDP:
 
         # Each agent's initial belief IS its game's world prior -- every agent, every role.
         # (There is no per-role initial belief; see FlexibleEnvParams.)
-        agent_initial_belief_states = self.all_env_parameters.initial_state_distribution[
-            agent_game_types
-        ]
+        agent_initial_belief_states = self.all_env_parameters.initial_state_distribution[agent_game_types]
 
         # Sample each game's true initial world state from its initial-state dist.
         num_games = game_types_per_game.shape[0]
@@ -909,9 +884,7 @@ class StackedSignificationDecPOMDP:
             # No utterances yet at reset: unrendered starts as a zero vector per agent
             # (sized by utterance_action_dim) so the utterance stage can write into it;
             # rendered is unused for now.
-            agent_utterance_actions_unrendered=jnp.zeros(
-                (self.num_agents, self.utterance_action_dim), dtype=jnp.float32
-            ),
+            agent_utterance_actions_unrendered=jnp.zeros((self.num_agents, self.utterance_action_dim), dtype=jnp.float32),
             agent_utterance_actions_rendered=None,
             agent_game_assignment=init["agent_game_assignment"],
             agent_role_assignment=init["agent_role_assignment"],
@@ -1105,9 +1078,7 @@ if __name__ == "__main__":
 
     # Bit 1: the utterance stage stashes ONLY the speaking role's (role 0 in a_to_b)
     # utterances; listeners (role 1) are zeroed.
-    after_utt, after_utt_obs, after_utt_rewards = sched_env.step_env(
-        jax.random.key(0), s0, utt, other_est, valid_belief
-    )
+    after_utt, after_utt_obs, after_utt_rewards = sched_env.step_env(jax.random.key(0), s0, utt, other_est, valid_belief)
     # A communication-only step (the utterance stage) yields zero environment reward.
     assert jnp.all(after_utt_rewards == 0.0), "utterance-stage step returns zero reward"
     assert jnp.all(after_utt_rewards == after_utt.last_agent_rewards), "returned reward matches state"
@@ -1220,10 +1191,7 @@ if __name__ == "__main__":
     print("=== episode boundary walk (horizon=2, b_to_a) ===")
     for t in range(4):
         b, _, _ = boundary_env.step_env(jax.random.key(100 + t), b, utt3, other_est3, valid3)
-        print(
-            f"  step {t}: env_iter={int(b.underlying_env_iteration)} "
-            f"cum_env={int(b.cumulative_env_iteration)} episode={int(b.episode_index)}"
-        )
+        print(f"  step {t}: env_iter={int(b.underlying_env_iteration)} " f"cum_env={int(b.cumulative_env_iteration)} episode={int(b.episode_index)}")
     assert int(b.episode_index) == 1, "a new episode began at the horizon"
     assert int(b.underlying_env_iteration) == 0, "per-episode env iter reset at the boundary"
     assert int(b.cumulative_env_iteration) == 2, "cumulative env iter keeps counting"

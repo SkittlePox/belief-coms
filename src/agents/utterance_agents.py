@@ -83,12 +83,8 @@ class ActorCriticUtteranceAgent(nn.Module):
 
     @nn.compact
     def __call__(self, own_belief, estimate_of_receiver_belief):
-        pi = UtteranceActor(
-            utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim
-        )(own_belief, estimate_of_receiver_belief)
-        value = UtteranceCritic(belief_dim=self.belief_dim)(
-            own_belief, estimate_of_receiver_belief
-        )
+        pi = UtteranceActor(utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim)(own_belief, estimate_of_receiver_belief)
+        value = UtteranceCritic(belief_dim=self.belief_dim)(own_belief, estimate_of_receiver_belief)
         return pi, value
 
 
@@ -97,17 +93,11 @@ if __name__ == "__main__":
     belief_dim = 5
     batch_size = 4
 
-    agent = ActorCriticUtteranceAgent(
-        utterance_action_dim=utterance_action_dim, belief_dim=belief_dim
-    )
+    agent = ActorCriticUtteranceAgent(utterance_action_dim=utterance_action_dim, belief_dim=belief_dim)
     key = jax.random.PRNGKey(0)
 
-    own_belief = jax.random.dirichlet(
-        key, alpha=jnp.ones(belief_dim), shape=(batch_size,)
-    )
-    estimate_of_receiver_belief = jax.random.dirichlet(
-        key, alpha=jnp.ones(belief_dim), shape=(batch_size,)
-    )
+    own_belief = jax.random.dirichlet(key, alpha=jnp.ones(belief_dim), shape=(batch_size,))
+    estimate_of_receiver_belief = jax.random.dirichlet(key, alpha=jnp.ones(belief_dim), shape=(batch_size,))
 
     params = agent.init(key, own_belief, estimate_of_receiver_belief)
     pi, value = agent.apply(params, own_belief, estimate_of_receiver_belief)

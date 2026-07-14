@@ -78,8 +78,7 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
 
     # Agent 1 genuinely believes state 0 is possible (sanity-check the reference).
     assert agent1_true_belief.probs[0] > 0.0, (
-        "reference: agent 1 (not seeing agent 0's action) should keep state-0 mass; "
-        f"got {agent1_true_belief.probs}"
+        "reference: agent 1 (not seeing agent 0's action) should keep state-0 mass; " f"got {agent1_true_belief.probs}"
     )
 
     # The estimate must not rule out state 0 that agent 1 itself cannot rule out.
@@ -105,7 +104,7 @@ def test_ego_belief_distribution_is_mandatory():
     belief_factory = CategoricalBeliefState(params)
     uniform_referent = jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0])
 
-    with pytest.raises(TypeError):        # missing positional argument
+    with pytest.raises(TypeError):  # missing positional argument
         belief_factory.update_other_belief_estimate_with_observation_only(
             distrax.Categorical(probs=uniform_referent),
             ego_observation=0,
@@ -117,8 +116,11 @@ def test_ego_belief_distribution_is_mandatory():
     with pytest.raises(ValueError, match="ego_belief_distribution is required"):
         belief_factory.update_other_belief_estimate_with_observation_only(
             distrax.Categorical(probs=uniform_referent),
-            None,                          # explicitly opting out is no longer allowed
-            0, 0, policies[1], agent_id=0,
+            None,  # explicitly opting out is no longer allowed
+            0,
+            0,
+            policies[1],
+            agent_id=0,
         )
 
 
@@ -134,10 +136,8 @@ def test_the_reset_observation_beats_the_prior():
     params, _ = guessing_game_spec()
     belief_factory = CategoricalBeliefState(params)
 
-    blind = np.asarray(params.initial_state_distribution)   # the best you can do UNOBSERVED
-    looking = np.asarray(
-        belief_factory.initial_other_belief_estimate(jnp.array(1), agent_id=0).probs
-    )
+    blind = np.asarray(params.initial_state_distribution)  # the best you can do UNOBSERVED
+    looking = np.asarray(belief_factory.initial_other_belief_estimate(jnp.array(1), agent_id=0).probs)
 
     np.testing.assert_allclose(blind, [1 / 3, 1 / 3, 1 / 3, 0.0], atol=1e-5)
     # The ego saw symbol 1 and ruled out state 1 for ITSELF. The other agent did not see it,

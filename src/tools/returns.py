@@ -78,9 +78,7 @@ class ExactReturnEvaluator:
 
                 # ∑_{s'} T(s'|s,a) R_ego(s,a,s'): gather the ego agent's reward row
                 # over next states and dot it with the transition distribution.
-                ego_rewards_for_each_state = self.env_params.reward[
-                    ego_agent_id, state, joint_action[0], joint_action[1], :
-                ]
+                ego_rewards_for_each_state = self.env_params.reward[ego_agent_id, state, joint_action[0], joint_action[1], :]
                 immediate = jnp.sum(ego_rewards_for_each_state * next_state_dist.probs)
 
                 if evaluation_depth <= 1:
@@ -130,15 +128,11 @@ class ExactReturnEvaluator:
                             )
                             return next_state_dist.prob(next_state) * obs_prob * future_v
 
-                        future = future + jnp.sum(
-                            jnp.nan_to_num(jax.vmap(per_next_state)(jnp.arange(self.num_unique_states)))
-                        )
+                        future = future + jnp.sum(jnp.nan_to_num(jax.vmap(per_next_state)(jnp.arange(self.num_unique_states))))
 
                 return (immediate + discount_factor * future) * other_action_dist.prob(other_action)
 
-            return jnp.sum(jax.vmap(as_if_other_acts)(jnp.arange(self.num_unique_actions))) * ego_action_dist.prob(
-                ego_action
-            )
+            return jnp.sum(jax.vmap(as_if_other_acts)(jnp.arange(self.num_unique_actions))) * ego_action_dist.prob(ego_action)
 
         return jnp.sum(jax.vmap(as_if_ego_acts)(jnp.arange(self.num_unique_actions)))
 

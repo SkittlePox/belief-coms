@@ -46,11 +46,11 @@ def build_transition_tensor(num_states, num_actions, done_state):
         for a0 in range(num_actions):
             for a1 in range(num_actions):
                 if s == done_state:
-                    next_state = done_state          # absorbing
+                    next_state = done_state  # absorbing
                 elif a0 == s:
-                    next_state = done_state          # correct button -> done
+                    next_state = done_state  # correct button -> done
                 else:
-                    next_state = s                   # stay
+                    next_state = s  # stay
                 T[s, a0, a1, next_state] = 1.0
     return jnp.asarray(T)
 
@@ -71,15 +71,15 @@ def build_observation_tensor(num_states, num_actions, num_observations, done_sta
     """
     O = np.zeros((num_states, num_actions, num_actions, num_observations, num_observations))
     done_symbol = num_observations - 1
-    num_referent_symbols = num_observations - 1   # every symbol except the done symbol
+    num_referent_symbols = num_observations - 1  # every symbol except the done symbol
     for s in range(num_states):
         row = np.zeros(num_observations)
         if s == done_state:
-            row[done_symbol] = 1.0                # deterministic "done" signal
+            row[done_symbol] = 1.0  # deterministic "done" signal
         else:
             others = [k for k in range(num_referent_symbols) if k != s]
-            row[others] = 1.0 / len(others)       # uniform over referent symbols != s
-        O[s, :, :, :, :] = np.outer(row, row)     # independent identical marginals
+            row[others] = 1.0 / len(others)  # uniform over referent symbols != s
+        O[s, :, :, :, :] = np.outer(row, row)  # independent identical marginals
     return jnp.asarray(O)
 
 
@@ -97,13 +97,14 @@ def build_reward_tensor(num_states, num_actions, num_agents, done_state):
             reward_array[s] = 1.0
         for a0 in range(num_actions):
             value = 0.0 if s == done_state else reward_array[a0]
-            R[:, s, a0, :, :] = value        # all agents, all a1, all s'
+            R[:, s, a0, :, :] = value  # all agents, all a1, all s'
     return jnp.asarray(R)
 
 
 # --------------------------------------------------------------------------- #
 # Optimal policies (Categorical(belief over states) -> Categorical(over actions))
 # --------------------------------------------------------------------------- #
+
 
 def role_0_optimal_policy(belief: distrax.Categorical) -> distrax.Categorical:
     """Button presser: press the state you believe is the truth.
@@ -166,8 +167,7 @@ if __name__ == "__main__":
 
             env_state, next_obs, (r0, r1), done = env.step_env(step_key, env_state, joint_action)
             episode_return += float(r0)
-            print(f"  t={t}: action={int(agent_0_action)}, reward=({float(r0):.2f}, {float(r1):.2f}), "
-                  f"obs={next_obs}, done={bool(done)}")
+            print(f"  t={t}: action={int(agent_0_action)}, reward=({float(r0):.2f}, {float(r1):.2f}), " f"obs={next_obs}, done={bool(done)}")
             if bool(done):
                 break
         print(f"episode return: {episode_return:.2f}")
@@ -179,8 +179,8 @@ if __name__ == "__main__":
     # needed. Here the presser repeatedly waits, observes, and updates its belief.
     belief_factory = CategoricalBeliefState(params)
     true_state = 0
-    wait = env.num_actions - 1                       # the "wait" action
-    wait_joint_action = (wait, wait)                 # presser waits; other agent inert
+    wait = env.num_actions - 1  # the "wait" action
+    wait_joint_action = (wait, wait)  # presser waits; other agent inert
     presser_obs_dist = params.observation[true_state, 0, 0].sum(axis=1)  # O(o | true_state)
 
     print(f"\n=== Learning by waiting (presser, true state = {true_state}) ===")
@@ -190,9 +190,7 @@ if __name__ == "__main__":
     for t in range(12):
         key, obs_key = jax.random.split(key)
         observation = distrax.Categorical(probs=presser_obs_dist).sample(seed=obs_key)
-        belief = belief_factory.update_with_observation_and_joint_action(
-            belief, observation, wait_joint_action, agent_id=0
-        )
+        belief = belief_factory.update_with_observation_and_joint_action(belief, observation, wait_joint_action, agent_id=0)
         identified = bool(belief.probs[true_state] > 0.999)
         note = "  <- identified the true state!" if identified else ""
         print(f"  t={t:<2}: saw symbol {int(observation)} -> belief = {belief.probs}{note}")

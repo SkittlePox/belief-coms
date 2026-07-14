@@ -40,8 +40,8 @@ class CommunicationScheme:
     scheme's length survives any downstream padding/stacking done by the env.
     """
 
-    who_speaks: chex.Array          # [num_rounds, num_speakers]
-    total_num_rounds: chex.Array    # scalar int
+    who_speaks: chex.Array  # [num_rounds, num_speakers]
+    total_num_rounds: chex.Array  # scalar int
 
     @classmethod
     def from_rows(cls, rows) -> "CommunicationScheme":
@@ -54,10 +54,10 @@ class CommunicationScheme:
 # for both the CLI Literal and the by-name registry -- add a scheme here and it is
 # selectable everywhere.
 _SCHEME_ROWS: dict[str, list[list[int]]] = {
-    "a_to_b":        [[1, 0]],                  # A->B, one round
-    "b_to_a":        [[0, 1]],                  # B->A, one round
+    "a_to_b": [[1, 0]],  # A->B, one round
+    "b_to_a": [[0, 1]],  # B->A, one round
     "a_to_b_thrice": [[1, 0], [1, 0], [1, 0]],  # A->B, three rounds
-    "both_speak":    [[1, 1]],                  # A->B & B->A, one round
+    "both_speak": [[1, 1]],  # A->B & B->A, one round
 }
 
 CommunicationSchemeName = Literal["a_to_b", "b_to_a", "a_to_b_thrice", "both_speak"]
@@ -105,7 +105,4 @@ class CommunicationConfig:
 if __name__ == "__main__":
     for name in _SCHEME_ROWS:
         scheme = get_scheme_fn(name)(0)
-        print(
-            f"{name}: who_speaks={scheme.who_speaks.tolist()} "
-            f"total_num_rounds={int(scheme.total_num_rounds)}"
-        )
+        print(f"{name}: who_speaks={scheme.who_speaks.tolist()} " f"total_num_rounds={int(scheme.total_num_rounds)}")

@@ -17,22 +17,23 @@ def paint_multiple_splines(all_spline_params: jnp.array, image_dim: int):
         def bezier_spline(t, P0, P1, P2):
             """Compute points on a quadratic Bézier spline for a given t."""
             t = t[:, None]  # Shape (N, 1) to broadcast with P0, P1, P2 of shape (2,)
-            P = (1 - t)**2 * P0 + 2 * (1 - t) * t * P1 + t**2 * P2
+            P = (1 - t) ** 2 * P0 + 2 * (1 - t) * t * P1 + t**2 * P2
             return P  # Returns shape (N, 2), a list of points on the spline
 
         brush_size = 1
 
         spline_params *= image_dim
-        
-        # P0, P1, P2 = spline_params.reshape((3, 2)) 
+
+        # P0, P1, P2 = spline_params.reshape((3, 2))
         P0, P1, P2 = spline_params[0:2], spline_params[2:4], spline_params[4:6]
         t_values = jnp.linspace(0, 1, num=50)
         spline_points = bezier_spline(t_values, P0, P1, P2)
         x_points, y_points = jnp.round(spline_points).astype(int).T
 
         # Generate brush offsets
-        brush_offsets = jnp.array([(dx, dy) for dx in range(-brush_size, brush_size)    # brush_size + 1
-                                            for dy in range(-brush_size, brush_size)])  # brush_size + 1
+        brush_offsets = jnp.array(
+            [(dx, dy) for dx in range(-brush_size, brush_size) for dy in range(-brush_size, brush_size)]  # brush_size + 1
+        )  # brush_size + 1
         x_offsets, y_offsets = brush_offsets.T
 
         # Calculate all indices to update for each point (broadcasting magic)
@@ -60,24 +61,15 @@ if __name__ == "__main__":
     # Each spline: 6 params [P0_x, P0_y, P1_x, P1_y, P2_x, P2_y] in [0, 1]
     # Outer vmap batches over "utterances", so input shape is (batch, num_splines * 6)
     test_cases = [
-        ("Single diagonal",
-         [0.1, 0.1, 0.5, 0.5, 0.9, 0.9]),
-        ("Single curved",
-         [0.1, 0.9, 0.5, 0.1, 0.9, 0.9]),
-        ("X shape (2 splines)",
-         [0.1, 0.1, 0.5, 0.5, 0.9, 0.9,
-          0.1, 0.9, 0.5, 0.5, 0.9, 0.1]),
-        ("Triangle (3 splines)",
-         [0.1, 0.8, 0.5, 0.1, 0.9, 0.8,
-          0.1, 0.8, 0.1, 0.5, 0.5, 0.1,
-          0.9, 0.8, 0.9, 0.5, 0.5, 0.1]),
-        ("Square (4 splines)",
-         [0.1, 0.1, 0.5, 0.1, 0.9, 0.1,
-          0.9, 0.1, 0.9, 0.5, 0.9, 0.9,
-          0.9, 0.9, 0.5, 0.9, 0.1, 0.9,
-          0.1, 0.9, 0.1, 0.5, 0.1, 0.1]),
-        ("Random (seed=42)",
-         np.random.default_rng(42).uniform(0, 1, 18).tolist()),
+        ("Single diagonal", [0.1, 0.1, 0.5, 0.5, 0.9, 0.9]),
+        ("Single curved", [0.1, 0.9, 0.5, 0.1, 0.9, 0.9]),
+        ("X shape (2 splines)", [0.1, 0.1, 0.5, 0.5, 0.9, 0.9, 0.1, 0.9, 0.5, 0.5, 0.9, 0.1]),
+        ("Triangle (3 splines)", [0.1, 0.8, 0.5, 0.1, 0.9, 0.8, 0.1, 0.8, 0.1, 0.5, 0.5, 0.1, 0.9, 0.8, 0.9, 0.5, 0.5, 0.1]),
+        (
+            "Square (4 splines)",
+            [0.1, 0.1, 0.5, 0.1, 0.9, 0.1, 0.9, 0.1, 0.9, 0.5, 0.9, 0.9, 0.9, 0.9, 0.5, 0.9, 0.1, 0.9, 0.1, 0.9, 0.1, 0.5, 0.1, 0.1],
+        ),
+        ("Random (seed=42)", np.random.default_rng(42).uniform(0, 1, 18).tolist()),
     ]
 
     labels = [t[0] for t in test_cases]

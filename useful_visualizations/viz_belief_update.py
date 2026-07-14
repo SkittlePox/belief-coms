@@ -96,12 +96,8 @@ def _rollout():
         # Both updates read the SAME pre-update (belief, estimate) -- mirror the env: the
         # true update marginalizes the partner action via the estimate, and the estimate
         # update refreshes the partner-belief estimate. Compute both, then advance.
-        new_true = factory.update_with_observation_only(
-            belief, estimate, obs, act, partner_policy, agent_id=EGO_ROLE
-        )
-        new_estimate = factory.update_other_belief_estimate_with_observation_only(
-            estimate, obs, act, partner_policy, agent_id=EGO_ROLE
-        )
+        new_true = factory.update_with_observation_only(belief, estimate, obs, act, partner_policy, agent_id=EGO_ROLE)
+        new_estimate = factory.update_other_belief_estimate_with_observation_only(estimate, obs, act, partner_policy, agent_id=EGO_ROLE)
         belief, estimate = new_true, new_estimate
         true_traj.append(np.asarray(belief.probs))
         est_traj.append(np.asarray(estimate.probs))
@@ -117,10 +113,12 @@ def render() -> str:
     row_labels = [f"t{i - 1}: {m}" if i > 0 else m for i, m in enumerate(meta)]
 
     fig = make_subplots(
-        rows=2, cols=2,
-        specs=[[{"type": "xy"}, {"type": "xy"}],
-               [{"colspan": 2, "type": "xy"}, None]],
-        row_heights=[0.56, 0.44], vertical_spacing=0.14, horizontal_spacing=0.10,
+        rows=2,
+        cols=2,
+        specs=[[{"type": "xy"}, {"type": "xy"}], [{"colspan": 2, "type": "xy"}, None]],
+        row_heights=[0.56, 0.44],
+        vertical_spacing=0.14,
+        horizontal_spacing=0.10,
         subplot_titles=(
             "true belief  b(s)  trajectory   [step × state]",
             "estimated belief  b̄(s)  (partner)  trajectory   [step × state]",
@@ -131,17 +129,31 @@ def render() -> str:
     # Row 1: whole-trajectory heatmaps (rows = steps top-down, cols = states).
     fig.add_trace(
         F.heatmap_trace(
-            true_traj, x=state_labels, y=row_labels, colorscale=F.PROB_SCALE,
-            zmin=0, zmax=1, hover="P", showscale=False,
+            true_traj,
+            x=state_labels,
+            y=row_labels,
+            colorscale=F.PROB_SCALE,
+            zmin=0,
+            zmax=1,
+            hover="P",
+            showscale=False,
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
     fig.add_trace(
         F.heatmap_trace(
-            est_traj, x=state_labels, y=row_labels, colorscale=F.PROB_SCALE,
-            zmin=0, zmax=1, hover="P", showscale=False,
+            est_traj,
+            x=state_labels,
+            y=row_labels,
+            colorscale=F.PROB_SCALE,
+            zmin=0,
+            zmax=1,
+            hover="P",
+            showscale=False,
         ),
-        row=1, col=2,
+        row=1,
+        col=2,
     )
     for c in (1, 2):
         fig.update_yaxes(autorange="reversed", row=1, col=c)
@@ -150,11 +162,13 @@ def render() -> str:
     true_bar_idx = len(fig.data)
     fig.add_trace(
         go.Bar(x=state_labels, y=true_traj[0], name="true b(s)", marker_color=F.ACCENT),
-        row=2, col=1,
+        row=2,
+        col=1,
     )
     fig.add_trace(
         go.Bar(x=state_labels, y=est_traj[0], name="estimate b̄(s)", marker_color=F.ACCENT_2),
-        row=2, col=1,
+        row=2,
+        col=1,
     )
     est_bar_idx = true_bar_idx + 1
     fig.update_yaxes(range=[0, 1.08], title_text="probability", row=2, col=1)
@@ -178,13 +192,15 @@ def render() -> str:
         barmode="group",
         margin=dict(l=60, r=30, t=90, b=60),
         legend=dict(orientation="h", yanchor="bottom", y=-0.14, x=0.5, xanchor="center"),
-        title=dict(text=(
-            f"Belief update inspector — ego role {EGO_ROLE}, "
-            f"observations {OBSERVATIONS}<br>"
-            f"<span style='font-size:13px;color:{F.MUTED}'>"
-            f"true belief vs estimate of partner's belief, driven by the real "
-            f"observation-only update</span>"
-        )),
+        title=dict(
+            text=(
+                f"Belief update inspector — ego role {EGO_ROLE}, "
+                f"observations {OBSERVATIONS}<br>"
+                f"<span style='font-size:13px;color:{F.MUTED}'>"
+                f"true belief vs estimate of partner's belief, driven by the real "
+                f"observation-only update</span>"
+            )
+        ),
     )
     F.attach_slider(fig, frames, labels, slider_prefix="step ")
     return F.write(fig, "viz_belief_update")

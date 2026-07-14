@@ -74,9 +74,7 @@ class ActorCriticUtteranceAgent(nn.Module):
 
     @nn.compact
     def __call__(self, target_belief):
-        pi = UtteranceActor(
-            utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim
-        )(target_belief)
+        pi = UtteranceActor(utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim)(target_belief)
         value = UtteranceCritic(belief_dim=self.belief_dim)(target_belief)
         return pi, value
 
@@ -86,14 +84,10 @@ if __name__ == "__main__":
     belief_dim = 5
     batch_size = 4
 
-    agent = ActorCriticUtteranceAgent(
-        utterance_action_dim=utterance_action_dim, belief_dim=belief_dim
-    )
+    agent = ActorCriticUtteranceAgent(utterance_action_dim=utterance_action_dim, belief_dim=belief_dim)
     key = jax.random.PRNGKey(0)
 
-    target_belief = jax.random.dirichlet(
-        key, alpha=jnp.ones(belief_dim), shape=(batch_size,)
-    )
+    target_belief = jax.random.dirichlet(key, alpha=jnp.ones(belief_dim), shape=(batch_size,))
 
     params = agent.init(key, target_belief)
     pi, value = agent.apply(params, target_belief)

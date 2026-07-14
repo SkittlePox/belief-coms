@@ -70,9 +70,7 @@ def _build_env():
         num_agents=NUM_AGENTS,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(
-            num_agents=NUM_AGENTS, underlying_env_steps_per_episode=4
-        ),
+        routing_fn=simple_routing_fn(num_agents=NUM_AGENTS, underlying_env_steps_per_episode=4),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
@@ -111,9 +109,7 @@ def _rollout(env):
     # acted once inside reset() (an act that is not surfaced as a separate substate).
     snaps = [tagged(state, -1, "reset")]
     for t in range(NUM_STEPS):
-        pre_act, state, _obs, _rewards = env.step_env_with_substate(
-            jax.random.key(t), state, utt, other_est, valid_belief
-        )
+        pre_act, state, _obs, _rewards = env.step_env_with_substate(jax.random.key(t), state, utt, other_est, valid_belief)
         # An act step advances cumulative_env_iteration; only then is the pre-act substate
         # (communication resolved, world not yet stepped) a distinct, informative frame, so
         # we splice it in as sub-frame "a" ahead of the post-act world-step frame "b".
@@ -181,53 +177,93 @@ def _traces(snap, num_games, num_states, num_actions, num_obs):
     action_labels = _action_labels(num_actions)
 
     routing = go.Heatmap(
-        z=_routing_matrix(snap, num_games), x=game_labels, y=agent_labels,
-        colorscale=ROLE_SCALE, zmin=0, zmax=1, showscale=False,
-        text=[["" if np.isnan(v) else f"role {int(v)}" for v in row]
-              for row in _routing_matrix(snap, num_games)],
-        texttemplate="%{text}", textfont=dict(size=10), hoverongaps=False,
+        z=_routing_matrix(snap, num_games),
+        x=game_labels,
+        y=agent_labels,
+        colorscale=ROLE_SCALE,
+        zmin=0,
+        zmax=1,
+        showscale=False,
+        text=[["" if np.isnan(v) else f"role {int(v)}" for v in row] for row in _routing_matrix(snap, num_games)],
+        texttemplate="%{text}",
+        textfont=dict(size=10),
+        hoverongaps=False,
         hovertemplate="%{y} in %{x}: %{text}<extra></extra>",
     )
     world = F.heatmap_trace(
-        snap["game_states"][None, :].astype(float), x=game_labels, y=["state"],
-        colorscale=F.PROB_SCALE, zmin=0, zmax=num_states - 1,
-        text=True, text_fmt="s={:.0f}", showscale=False, hover="state",
+        snap["game_states"][None, :].astype(float),
+        x=game_labels,
+        y=["state"],
+        colorscale=F.PROB_SCALE,
+        zmin=0,
+        zmax=num_states - 1,
+        text=True,
+        text_fmt="s={:.0f}",
+        showscale=False,
+        hover="state",
     )
     counters = F.bar_trace(
         [snap["env_iter"], snap["cum_env"], snap["round_cursor"], snap["cum_round"]],
-        labels=["env_iter", "cum_env", "round", "cum_round"], color=F.ACCENT,
+        labels=["env_iter", "cum_env", "round", "cum_round"],
+        color=F.ACCENT,
     )
     true_b = F.heatmap_trace(
-        snap["true_beliefs"], x=state_labels, y=agent_labels,
-        colorscale=F.PROB_SCALE, zmin=0, zmax=1, showscale=False, hover="P",
+        snap["true_beliefs"],
+        x=state_labels,
+        y=agent_labels,
+        colorscale=F.PROB_SCALE,
+        zmin=0,
+        zmax=1,
+        showscale=False,
+        hover="P",
     )
     est_b = F.heatmap_trace(
-        snap["est_beliefs"], x=state_labels, y=agent_labels,
-        colorscale=F.PROB_SCALE, zmin=0, zmax=1, showscale=False, hover="P",
+        snap["est_beliefs"],
+        x=state_labels,
+        y=agent_labels,
+        colorscale=F.PROB_SCALE,
+        zmin=0,
+        zmax=1,
+        showscale=False,
+        hover="P",
     )
     actions_m = _actions_matrix(snap, num_actions)
     actions = go.Heatmap(
-        z=actions_m, x=action_labels, y=agent_labels,
-        colorscale=ACTION_SCALE, zmin=0, zmax=1, showscale=False,
-        text=[[action_labels[j] if actions_m[i, j] > 0 else "" for j in range(num_actions)]
-              for i in range(NUM_AGENTS)],
-        texttemplate="%{text}", textfont=dict(size=10),
+        z=actions_m,
+        x=action_labels,
+        y=agent_labels,
+        colorscale=ACTION_SCALE,
+        zmin=0,
+        zmax=1,
+        showscale=False,
+        text=[[action_labels[j] if actions_m[i, j] > 0 else "" for j in range(num_actions)] for i in range(NUM_AGENTS)],
+        texttemplate="%{text}",
+        textfont=dict(size=10),
         hovertemplate="%{y} took %{x}<extra></extra>",
     )
     rewards = go.Bar(
-        x=agent_labels, y=snap["rewards"], showlegend=False,
+        x=agent_labels,
+        y=snap["rewards"],
+        showlegend=False,
         marker_color=[F.ACCENT_2 if r >= 0 else "#c0392b" for r in snap["rewards"]],
-        text=[f"{r:+.2f}" for r in snap["rewards"]], textposition="outside", cliponaxis=False,
+        text=[f"{r:+.2f}" for r in snap["rewards"]],
+        textposition="outside",
+        cliponaxis=False,
         hovertemplate="%{x}: %{y:+.3f}<extra></extra>",
     )
     obs_m = _obs_matrix(snap, num_obs)
     obs_labels = _obs_labels(num_obs)
     observations = go.Heatmap(
-        z=obs_m, x=obs_labels, y=agent_labels,
-        colorscale=OBS_SCALE, zmin=0, zmax=1, showscale=False,
-        text=[[obs_labels[j] if obs_m[i, j] > 0 else "" for j in range(num_obs)]
-              for i in range(NUM_AGENTS)],
-        texttemplate="%{text}", textfont=dict(size=10),
+        z=obs_m,
+        x=obs_labels,
+        y=agent_labels,
+        colorscale=OBS_SCALE,
+        zmin=0,
+        zmax=1,
+        showscale=False,
+        text=[[obs_labels[j] if obs_m[i, j] > 0 else "" for j in range(num_obs)] for i in range(NUM_AGENTS)],
+        texttemplate="%{text}",
+        textfont=dict(size=10),
         hovertemplate="%{y} saw %{x}<extra></extra>",
     )
     return [routing, world, counters, true_b, est_b, actions, rewards, observations]
@@ -239,10 +275,10 @@ def _step_label(snap):
         return "reset"
     label = f"step {snap['step']}"
     if snap["phase"] == "pre_act":
-        return label + "a"   # communication resolved, world about to step
+        return label + "a"  # communication resolved, world about to step
     if snap["phase"] == "act":
-        return label + "b"   # world stepped
-    return label             # communication-only step
+        return label + "b"  # world stepped
+    return label  # communication-only step
 
 
 def _title(snap, is_act, is_boundary):
@@ -277,11 +313,16 @@ def render() -> str:
     is_boundary = [False] + [snaps[i]["episode"] > snaps[i - 1]["episode"] for i in range(1, len(snaps))]
 
     fig = make_subplots(
-        rows=3, cols=3,
-        specs=[[{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
-               [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
-               [{"colspan": 2, "type": "xy"}, None, {"type": "xy"}]],
-        row_heights=[0.30, 0.44, 0.26], vertical_spacing=0.11, horizontal_spacing=0.08,
+        rows=3,
+        cols=3,
+        specs=[
+            [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
+            [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}],
+            [{"colspan": 2, "type": "xy"}, None, {"type": "xy"}],
+        ],
+        row_heights=[0.30, 0.44, 0.26],
+        vertical_spacing=0.11,
+        horizontal_spacing=0.08,
         subplot_titles=(
             "routing — agents ▸ (game, role)",
             "world — each game's true state",
@@ -300,12 +341,10 @@ def render() -> str:
         fig.add_trace(trace, row=r, col=c)
 
     # Grids read top-down (agent 0 on top); bar axes get sensible ranges.
-    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3), (3, 3)]:
+    for r, c in [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3), (3, 3)]:
         fig.update_yaxes(autorange="reversed", row=r, col=c)
     # Headroom so the outside value labels on the bars don't clip.
-    counter_max = max(
-        max(s["env_iter"], s["cum_env"], s["round_cursor"], s["cum_round"]) for s in snaps
-    )
+    counter_max = max(max(s["env_iter"], s["cum_env"], s["round_cursor"], s["cum_round"]) for s in snaps)
     fig.update_yaxes(title_text="count", range=[0, counter_max * 1.25 + 1], row=1, col=3)
     fig.update_yaxes(title_text="reward", range=[-1.4, 1.4], row=3, col=1)
 

@@ -5,16 +5,21 @@ import chex
 from flax import struct
 from typing import Callable, Union
 
+
 @struct.dataclass
 class AgentGameRoleRoute:
     """
     This routing class contains all the logic for what games agents are subjected to.
     Each AgentGameRoleRoute represents an assignment of agents to a full episode in a game (with underlying_env_steps_per_episode timesteps).
     """
-    game_set: chex.Array                   # [num agents / 2], index i represents game i's game type index
-    agent_game_assignment: chex.Array      # [num agents], index i represents agent i's assigned game (between 0 and num_agents/2)
-    agent_role_assignment: chex.Array      # [num agents], index i represents agent i's assigned role in a game (either 0 or 1)
-    underlying_env_steps_per_episode: chex.Array  # scalar int: how many underlying-DecPOMDP steps this episode runs (lockstep across all games; early-terminating games are masked, not re-routed)
+
+    game_set: chex.Array  # [num agents / 2], index i represents game i's game type index
+    agent_game_assignment: chex.Array  # [num agents], index i represents agent i's assigned game (between 0 and num_agents/2)
+    agent_role_assignment: chex.Array  # [num agents], index i represents agent i's assigned role in a game (either 0 or 1)
+    underlying_env_steps_per_episode: (
+        chex.Array
+    )  # scalar int: how many underlying-DecPOMDP steps this episode runs (lockstep across all games; early-terminating games are masked, not re-routed)
+
 
 # RouteFn is sampled once per episode; `iteration` is the episode index.
 RouteFn = Callable[[chex.PRNGKey, int], AgentGameRoleRoute]  # (key, iteration) -> route
@@ -68,20 +73,14 @@ def simple_routing_fn(
 
         agent_for_slot = jax.random.permutation(key, num_agents)  # slot -> agent id
 
-        agent_game_assignment = (
-            jnp.zeros((num_agents,), dtype=jnp.int32).at[agent_for_slot].set(game_per_slot)
-        )
-        agent_role_assignment = (
-            jnp.zeros((num_agents,), dtype=jnp.int32).at[agent_for_slot].set(role_per_slot)
-        )
+        agent_game_assignment = jnp.zeros((num_agents,), dtype=jnp.int32).at[agent_for_slot].set(game_per_slot)
+        agent_role_assignment = jnp.zeros((num_agents,), dtype=jnp.int32).at[agent_for_slot].set(role_per_slot)
 
         return AgentGameRoleRoute(
             game_set=game_set,
             agent_game_assignment=agent_game_assignment,
             agent_role_assignment=agent_role_assignment,
-            underlying_env_steps_per_episode=jnp.asarray(
-                underlying_env_steps_per_episode, dtype=jnp.int32
-            ),
+            underlying_env_steps_per_episode=jnp.asarray(underlying_env_steps_per_episode, dtype=jnp.int32),
         )
 
     return route
@@ -114,12 +113,10 @@ def fixed_pairs_routing_fn(
     # it; `route` ignores key and iteration entirely.
     slots = jnp.arange(num_agents)
     fixed_route = AgentGameRoleRoute(
-        game_set=jnp.zeros((num_games,), dtype=jnp.int32),               # all game type 0
+        game_set=jnp.zeros((num_games,), dtype=jnp.int32),  # all game type 0
         agent_game_assignment=(slots // AGENTS_PER_GAME).astype(jnp.int32),
         agent_role_assignment=(slots % AGENTS_PER_GAME).astype(jnp.int32),
-        underlying_env_steps_per_episode=jnp.asarray(
-            underlying_env_steps_per_episode, dtype=jnp.int32
-        ),
+        underlying_env_steps_per_episode=jnp.asarray(underlying_env_steps_per_episode, dtype=jnp.int32),
     )
 
     def route(key: chex.PRNGKey, iteration: int) -> AgentGameRoleRoute:
@@ -178,9 +175,7 @@ RoutingConfig = Union[SimpleRoutingConfig, FixedPairsRoutingConfig]
 if __name__ == "__main__":
     key = jax.random.key(0)
 
-    route_fn = simple_routing_fn(
-        num_agents=10, game_type_id=0, underlying_env_steps_per_episode=7
-    )
+    route_fn = simple_routing_fn(num_agents=10, game_type_id=0, underlying_env_steps_per_episode=7)
     route = route_fn(key, iteration=0)
 
     print("game_set:              ", route.game_set)

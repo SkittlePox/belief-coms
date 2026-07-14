@@ -66,12 +66,12 @@ class FlexibleEnvParams:
     num_actions: chex.Array
     num_states: chex.Array
     initial_state_distribution: chex.Array  # [S], the world prior AND every agent's prior
-    terminal_mask: chex.Array               # [S], 1 on terminal states
+    terminal_mask: chex.Array  # [S], 1 on terminal states
 
 
 @struct.dataclass
 class FlexibleEnvState:
-    state_index: chex.Array   # The DecPOMDP world state
+    state_index: chex.Array  # The DecPOMDP world state
     done: chex.Array
 
 
@@ -135,9 +135,7 @@ class FlexibleEnv:
     def reset(self, key: chex.PRNGKey):
         """Sample the initial world state from params.initial_state_distribution."""
         state_key, obs_key = jax.random.split(key)
-        state_index = distrax.Categorical(
-            probs=self.params.initial_state_distribution
-        ).sample(seed=state_key)
+        state_index = distrax.Categorical(probs=self.params.initial_state_distribution).sample(seed=state_key)
         state = FlexibleEnvState(state_index=state_index, done=jnp.array(0))
         return state, self.get_obs(obs_key, state)
 
