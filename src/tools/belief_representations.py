@@ -414,8 +414,17 @@ class CategoricalBeliefState:
             ego_belief_distribution = other_belief_distribution_estimate
 
         # What the OTHER agent assumes about OUR action -- they never saw it. Uniform is
-        # the level-0 assumption, and it matches what memo-decpomdp's exact model does
-        # (`opp: chooses(a in Ac, uniformly)`), so the two stay comparable.
+        # the level-0 cop-out, and it is only the DEFAULT, not the answer. What they
+        # actually do is infer our action from THEIR estimate of OUR belief, i.e.
+        #
+        #     ego_action_prior = pi_ego(bel[2])
+        #
+        # where bel[2] is the ego's estimate of the other agent's estimate of the ego's
+        # belief. That is level 2 of a tower, and it does not stop there. Rather than
+        # hand-roll the recursion -- the conditioning rules are subtle and easy to get
+        # wrong -- use tools.nested_belief.build_nested_belief_step, which carries the whole
+        # tower at arbitrary depth and derives the rules from memo's nested `thinks[...]`.
+        # Feed its bel[2] in here, or just use it instead of this method.
         if ego_action_prior is None:
             ego_action_prior = jnp.ones(self.num_unique_actions) / self.num_unique_actions
 

@@ -1,12 +1,8 @@
 """Tests for tools/belief_representations.py.
 
-Run either directly (matches this repo's ``python -m`` convention)::
+Run with::
 
-    uv run python -m tools.test_belief_representations
-
-or under pytest::
-
-    uv run pytest src/tools/test_belief_representations.py
+    uv run pytest tests/test_belief_representations.py
 """
 
 import distrax
