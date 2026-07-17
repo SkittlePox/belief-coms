@@ -18,13 +18,17 @@ import dataclasses
 # renders as subcommands.
 from communication.communication_scheme import CommunicationConfig
 from communication.game_role_assignment import AssignmentConfig, SimpleAssignmentConfig
+from agents.belief_agents import BeliefAgentConfig
+from agents.utterance_agents import UtteranceAgentConfig
 
 
 @dataclasses.dataclass
 class ExperimentConfig:
     """Full run config."""
 
-    seed: int = 42
+    jax_seed: int = 42
     learning_rate: float = 1e-3
-    assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
+    role_assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
     communication: CommunicationConfig = dataclasses.field(default_factory=CommunicationConfig)
+    belief_agents: BeliefAgentConfig = dataclasses.field(default_factory=BeliefAgentConfig)
+    utterance_agents: UtteranceAgentConfig = dataclasses.field(default_factory=UtteranceAgentConfig)

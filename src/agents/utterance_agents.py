@@ -1,8 +1,24 @@
+import dataclasses
 import flax.linen as nn
-from typing import Sequence
+from typing import Tuple
 import distrax
 import jax
 import jax.numpy as jnp
+
+# Architecture defaults, shared by the modules below and by ``UtteranceAgentConfig`` so
+# that constructing a module directly (e.g. in tests) matches the tyro-config default.
+DEFAULT_TRUNK_DIMS: Tuple[int, ...] = (128, 128, 128)
+
+
+def _dense_trunk(own_belief, estimate_of_receiver_belief, trunk_dims):
+    """Shared encoder: concatenate the two beliefs then a dense trunk. Returns the
+    trunk activations; each head (actor/critic) owns its own copy of these params
+    (they call this separately)."""
+    x = jnp.concatenate([own_belief, estimate_of_receiver_belief], axis=-1)
+    for dim in trunk_dims:
+        x = nn.Dense(dim)(x)
+        x = nn.relu(x)
+    return x
 
 
 class UtteranceActor(nn.Module):
@@ -21,16 +37,11 @@ class UtteranceActor(nn.Module):
 
     utterance_action_dim: int
     belief_dim: int
+    trunk_dims: Tuple[int, ...] = DEFAULT_TRUNK_DIMS
 
     @nn.compact
     def __call__(self, own_belief, estimate_of_receiver_belief):
-        x = jnp.concatenate([own_belief, estimate_of_receiver_belief], axis=-1)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = _dense_trunk(own_belief, estimate_of_receiver_belief, self.trunk_dims)
 
         mean = nn.Dense(self.utterance_action_dim)(x)
         mean = nn.sigmoid(mean)
@@ -51,16 +62,11 @@ class UtteranceCritic(nn.Module):
     """
 
     belief_dim: int
+    trunk_dims: Tuple[int, ...] = DEFAULT_TRUNK_DIMS
 
     @nn.compact
     def __call__(self, own_belief, estimate_of_receiver_belief):
-        x = jnp.concatenate([own_belief, estimate_of_receiver_belief], axis=-1)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
+        x = _dense_trunk(own_belief, estimate_of_receiver_belief, self.trunk_dims)
         x = nn.Dense(1)(x)
         return jnp.squeeze(x, axis=-1)
 
@@ -80,12 +86,41 @@ class ActorCriticUtteranceAgent(nn.Module):
 
     utterance_action_dim: int
     belief_dim: int
+    trunk_dims: Tuple[int, ...] = DEFAULT_TRUNK_DIMS
 
     @nn.compact
     def __call__(self, own_belief, estimate_of_receiver_belief):
-        pi = UtteranceActor(utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim)(own_belief, estimate_of_receiver_belief)
-        value = UtteranceCritic(belief_dim=self.belief_dim)(own_belief, estimate_of_receiver_belief)
+        pi = UtteranceActor(utterance_action_dim=self.utterance_action_dim, belief_dim=self.belief_dim, trunk_dims=self.trunk_dims)(
+            own_belief, estimate_of_receiver_belief
+        )
+        value = UtteranceCritic(belief_dim=self.belief_dim, trunk_dims=self.trunk_dims)(own_belief, estimate_of_receiver_belief)
         return pi, value
+
+
+@dataclasses.dataclass(frozen=True)
+class UtteranceAgentConfig:
+    """Architecture knobs for ``ActorCriticUtteranceAgent``.
+
+    Mirrors the ``BeliefAgentConfig``/``AssignmentConfig`` idiom: a tyro-facing dataclass
+    of knobs whose ``build()`` returns the configured object, keeping the ``nn.Module``
+    free of any config-parsing. ``build()`` takes the env-derived shapes
+    (``utterance_action_dim``, ``belief_dim``) as arguments, since those are not
+    user-facing architecture choices.
+
+    This is an MLP-only agent, so the sole knob is the dense-trunk width/depth.
+    ``trunk_dims`` is a tuple (not a list) because it becomes an ``nn.Module`` attribute,
+    which must be hashable for jit's static treatment; tyro produces tuples from
+    ``Tuple[int, ...]`` natively.
+    """
+
+    trunk_dims: Tuple[int, ...] = DEFAULT_TRUNK_DIMS
+
+    def build(self, utterance_action_dim: int, belief_dim: int) -> nn.Module:
+        return ActorCriticUtteranceAgent(
+            utterance_action_dim=utterance_action_dim,
+            belief_dim=belief_dim,
+            trunk_dims=self.trunk_dims,
+        )
 
 
 if __name__ == "__main__":
@@ -93,7 +128,8 @@ if __name__ == "__main__":
     belief_dim = 5
     batch_size = 4
 
-    agent = ActorCriticUtteranceAgent(utterance_action_dim=utterance_action_dim, belief_dim=belief_dim)
+    # Build through the config to exercise the tyro-facing path (default arch).
+    agent = UtteranceAgentConfig().build(utterance_action_dim=utterance_action_dim, belief_dim=belief_dim)
     key = jax.random.PRNGKey(0)
 
     own_belief = jax.random.dirichlet(key, alpha=jnp.ones(belief_dim), shape=(batch_size,))

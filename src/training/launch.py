@@ -31,7 +31,11 @@ _DEFAULT_WANDB_CONFIG = WandbConfig()
 
 
 def main(
-    experiment_config: Annotated[ExperimentConfig, tyro.conf.OmitArgPrefixes],
+    # name="" drops only the top-level `experiment-config.` prefix while keeping the
+    # meaningful sub-config prefixes (e.g. --belief-agents.trunk-dims vs
+    # --utterance-agents.trunk-dims), which disambiguates fields that share a leaf name
+    # across sub-configs. (OmitArgPrefixes flattened everything and collided on trunk_dims.)
+    experiment_config: Annotated[ExperimentConfig, tyro.conf.arg(name="")],
     wandb_config: Annotated[WandbConfig, tyro.conf.arg(name="wandb")] = _DEFAULT_WANDB_CONFIG,
 ):
     run = wandb.init(
