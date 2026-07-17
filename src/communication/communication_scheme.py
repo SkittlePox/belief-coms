@@ -17,7 +17,7 @@ A: No. ``communication_scheme_fn(iteration)`` returns a *single* CommunicationSc
    (write a CommunicationSchemeFn whose output depends on ``iteration``), but within
    an iteration all games communicate identically -- there is no per-game scheme
    axis. Supporting per-game schemes would mean indexing the scheme by game (the way
-   ``game_set`` indexes game type in routing.py); we intentionally do not.
+   ``game_set`` indexes game type in game_role_assignment.py); we intentionally do not.
 """
 
 import dataclasses
@@ -64,7 +64,7 @@ CommunicationSchemeName = Literal["a_to_b", "b_to_a", "a_to_b_thrice", "both_spe
 
 
 # A CommunicationSchemeFn maps an in-game iteration to the scheme in force then,
-# analogous to RouteFn in routing.py. ``iteration`` is the cumulative in-game
+# analogous to AssignmentFn in game_role_assignment.py. ``iteration`` is the cumulative in-game
 # (signification-game) iteration count -- not the per-episode env step count. Every
 # scheme below is constant (iteration-independent); for an iteration-varying scheme,
 # write a CommunicationSchemeFn that branches on ``iteration``, e.g. a curriculum:
@@ -91,9 +91,9 @@ both_speak_scheme_fn = get_scheme_fn("both_speak")
 class CommunicationConfig:
     """Which communication scheme governs the games.
 
-    A flat name selector, not a union of families like RoutingConfig -- communication
+    A flat name selector, not a union of families like AssignmentConfig -- communication
     is one-of-N, so there are no per-family params. Exposes the same ``build()``
-    interface as the routing configs so callers resolve both uniformly.
+    interface as the assignment configs so callers resolve both uniformly.
     """
 
     scheme: CommunicationSchemeName = "a_to_b"

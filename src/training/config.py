@@ -13,11 +13,11 @@ import dataclasses
 
 # Each domain's config type is owned by its library module (colocated with the code
 # it configures, so options and code can't drift); this module just assembles them
-# into ExperimentConfig. CommunicationConfig is a flat scheme selector; RoutingConfig
+# into ExperimentConfig. CommunicationConfig is a flat scheme selector; AssignmentConfig
 # is a Union of per-family configs (disjoint params, each with build()) that tyro
 # renders as subcommands.
 from communication.communication_scheme import CommunicationConfig
-from communication.routing import RoutingConfig, SimpleRoutingConfig
+from communication.game_role_assignment import AssignmentConfig, SimpleAssignmentConfig
 
 
 @dataclasses.dataclass
@@ -26,5 +26,5 @@ class ExperimentConfig:
 
     seed: int = 42
     learning_rate: float = 1e-3
-    routing: RoutingConfig = dataclasses.field(default_factory=SimpleRoutingConfig)
+    assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
     communication: CommunicationConfig = dataclasses.field(default_factory=CommunicationConfig)

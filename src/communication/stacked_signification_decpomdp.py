@@ -4,7 +4,7 @@ import distrax
 from flax import struct
 from typing import Any, Callable, Sequence
 from functools import partial
-from communication.routing import RouteFn
+from communication.game_role_assignment import AssignmentFn
 from communication.communication_scheme import CommunicationSchemeFn
 
 # FlexibleEnvParams / OptimalPolicy are defined in envs.flexible_env (the leaf of
@@ -19,85 +19,70 @@ UTTERANCE_STAGE = 0  # the speaker emits an utterance / message action
 BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 
 
-# Iterator Q&A (the four counters in StackedSignificationState)
-# -------------------------------------------------------------
-# Q: What do "round" and "block" mean?
-# A: A communication ROUND is one entry of a communication BLOCK -- a single
-#    speaker(s)->listener(s) exchange. It plays out over TWO step_env calls (the
-#    UTTERANCE stage then the BELIEF stage; see communicative_round_stage). A BLOCK is
-#    the whole CommunicationScheme active that happens *between* two underlying-env steps: a sequence
-#    of total_num_rounds rounds. The block's LAST round is the one whose belief stage
-#    also steps the underlying DecPOMDP (the "act"). communication_scheme_fn hands back
-#    one block per underlying-env step (keyed by cumulative_env_iteration).
+# Terminology
+# -----------
+# ROUND:  One speaker->listener exchange, spanning TWO step_env calls (UTTERANCE_STAGE
+#         then BELIEF_STAGE).
+# BLOCK:  The full CommunicationScheme between two underlying-env steps: a sequence of
+#         rounds. The block's last round's belief stage also steps the DecPOMDP ("act").
+# EPISODE: A sequence of blocks; ends when underlying_env_iteration hits episode_horizon,
+#          at which point assignment_fn re-assigns agents to games/roles.
 #
-# Q: Why four iterators?
-# A: Two clocks (underlying-DecPOMDP steps vs communication rounds) x two scopes
-#    (this episode vs cumulative over the whole run).
+# Substates of StackedSignificationState
+# ---------------------------------------
+# dialog (DialogState):       The communication round state machine -- which round/stage
+#                              we're in and the active block's who_speaks schedule.
+# game_roles (GameRoleState): Agent-to-game/role assignment, set per episode.
+# game_counters (GameCountersState): Four counters tracking position in the episode
+#                              (underlying_env_iteration, episode_index) and across
+#                              training (cumulative_env_iteration, episode_horizon).
 #
-# Q: underlying_env_iteration vs cumulative_env_iteration?
-# A: Both count underlying-DecPOMDP steps (acts). underlying_env_iteration resets to 0
-#    at each episode boundary and is compared to the route horizon to detect the end of
-#    an episode. cumulative_env_iteration never resets and is the key passed to
-#    communication_scheme_fn, so the scheme can change over training.
+# Beliefs (top-level, subject-indexed)
+# ------------------------------------
+# true_agent_belief_states[i]:      Agent i's OWN belief over world states [S].
+# estimated_agent_belief_states[i]: The estimate ABOUT agent i's belief (held by i's
+#                                   partner). Subject-indexed so it aligns row-for-row
+#                                   with true beliefs.
 #
-# Q: communication_round_iterator vs cumulative_communication_round_iterator?
-# A: communication_round_iterator is the cursor WITHIN the active block
-#    (0..total_num_rounds-1); it advances once per COMPLETED round and wraps to 0 when
-#    the block's last round acts. cumulative_communication_round_iterator counts
-#    step_env calls and never resets. Each round spans TWO step_env calls (UTTERANCE
-#    then BELIEF -- see communicative_round_stage), so it increments twice per round.
+# To get agent i's estimate OF its partner: estimated_agent_belief_states[partner(i)]
+# (the partner map is its own inverse in a dyad).
 #
-# Q: What changes on a single step_env call?
-# A: Always: cumulative_communication_round_iterator += 1 and the stage toggles. On a
-#    BELIEF stage the round completes, so communication_round_iterator
-#    advances (or wraps); and if that was the block's last round, both env iterations
-#    += 1 and the next block is fetched.
+# The estimate matters because each agent marginalizes its partner's unobserved action
+# via the partner's optimal policy applied to this estimate. A bad estimate corrupts the
+# true-belief update.
 #
-# Q: And episode_index / episode_horizon (not iterators, but related)?
-# A: episode_horizon is this episode's length (the route's underlying_env_steps_per_episode);
-#    when underlying_env_iteration reaches it after an act, the episode ends. episode_index
-#    counts episodes and keys the re-route (routing_fn(key, episode_index)).
-#
-# Belief & estimate Q&A (true_agent_belief_states / estimated_agent_belief_states)
-# --------------------------------------------------------------------------------
-# Q: What is true_agent_belief_states[i]?
-# A: Agent i's OWN belief -- a distribution [S] over the world states of the game i is in.
-#    Indexed by the agent whose belief it is. Exactly one row per agent.
-#
-# Q: What is estimated_agent_belief_states[i]?
-# A: The estimate of AGENT i's belief -- i.e. what agent i's dyadic partner thinks i
-#    believes -- again a distribution [S]. It is indexed the SAME way as
-#    true_agent_belief_states: by the SUBJECT (the agent being estimated). So the two rows
-#    for agent i are "what i actually believes" and "what i's partner thinks i believes".
-#
-# Q: Subject-indexed vs estimator-indexed -- why call this out?
-# A: The same table ("X's estimate of Y") can be laid out two ways:
-#      - subject-indexed:   row i = the estimate ABOUT agent i (this codebase).
-#      - estimator-indexed: row i = agent i's estimate of its partner.
-#    In a dyad these are just the pair swapped, so they are easy to conflate but put a
-#    given number in different rows. We keep estimated_agent_belief_states subject-indexed
-#    so it lines up row-for-row with true_agent_belief_states.
-#
-# Q: If storage is subject-indexed, how does an agent get its OWN estimate of its partner
-#    (which the belief update needs)?
-# A: By a partner lookup. Agent i's estimate of its partner is the estimate ABOUT the
-#    partner, which lives at the PARTNER's row: estimated_agent_belief_states[partner(i)].
-#    _step_underlying_env does exactly this gather (via game_role_to_agent) before the
-#    update, and scatters the refreshed estimates back by the same partner map afterward.
-#
-# Q: Why does the estimate feed the underlying act at all?
-# A: In the act each agent updates its true belief from ONLY its own observation; the
-#    partner's action is unobserved. To marginalize it out, the agent runs the partner's
-#    optimal policy on its estimate of the partner's belief (the partner-row lookup
-#    above). So a bad estimate (e.g. mass on a padding state) corrupts the true-belief
-#    update.
-#
-# Q: How does the step_env input belief_estimate_post_utterance relate?
-# A: It is subject-indexed to match this field: belief_estimate_post_utterance[i] is
-#    the refreshed estimate ABOUT agent i once i's partner (the speaker) has uttered. On
-#    the utterance stage the LISTENERS' rows are overwritten with it (bit 1b) -- the
-#    listener is the subject a speaker just re-estimated -- and speakers' rows are
-#    untouched. No remap is needed because both objects are subject-indexed.
+# belief_estimate_post_utterance (step_env input) is also subject-indexed: row i is the
+# refreshed estimate ABOUT agent i after i's partner (the speaker) has uttered.
+@struct.dataclass
+class DialogState:
+    """Communication round state machine: which round/stage we're in and what the active block looks like."""
+
+    active_who_speaks: chex.Array  # [num_rounds (padded), num_speakers]
+    active_total_num_rounds: chex.Array  # scalar int: real round count of the active block (excludes padding)
+    communication_round_iterator: chex.Array  # scalar int: round within the active block (0..total_num_rounds-1)
+    cumulative_communication_round_iterator: chex.Array  # scalar int: total step_env calls; never resets
+    communicative_round_stage: chex.Array  # scalar int: UTTERANCE_STAGE or BELIEF_STAGE
+
+
+@struct.dataclass
+class GameRoleState:
+    """Agent-to-game/role assignment. Set at episode boundaries, read-only during steps."""
+
+    agent_game_assignment: chex.Array  # [num_agents] -> game index
+    agent_role_assignment: chex.Array  # [num_agents] -> role index
+    game_types: chex.Array  # [num_games]  -> game-type index
+
+
+@struct.dataclass
+class GameCountersState:
+    """Episode and training-run progress counters."""
+
+    underlying_env_iteration: chex.Array  # scalar int; resets to 0 at each episode boundary
+    cumulative_env_iteration: chex.Array  # scalar int; never resets; the key passed to communication_scheme_fn
+    episode_index: chex.Array  # scalar int; which episode we are in; +1 at each boundary; keys the re-route
+    episode_horizon: chex.Array  # scalar int; this episode's underlying_env_steps_per_episode (from the route)
+
+
 @struct.dataclass
 class StackedSignificationState:
     """State carried by the StackedSignificationDecPOMDP across step_env calls.
@@ -112,42 +97,15 @@ class StackedSignificationState:
     rendered field is unused for now (None).
     """
 
+    # Substates: bookkeeping grouped by concern.
+    dialog: DialogState
+    game_roles: GameRoleState
+    game_counters: GameCountersState
+
     # Communication: the agents' utterance actions (raw and rendered). Populated by
     # the communication phase of step_env; None after reset.
     agent_utterance_actions_unrendered: chex.Array
     agent_utterance_actions_rendered: chex.Array
-
-    # Routing: which game / role each agent occupies, and each game's type.
-    agent_game_assignment: chex.Array  # [num_agents] -> game index
-    agent_role_assignment: chex.Array  # [num_agents] -> role index
-    game_types: chex.Array  # [num_games]  -> game-type index
-
-    # Progress: how many underlying-DecPOMDP steps have elapsed this episode (the
-    # in-game iteration ``g``). All games advance in lockstep, so this is a single
-    # scalar shared across games. Used to index a time-varying communication scheme
-    # and to detect the episode horizon. Set at reset (0, or 1 if reset acts first).
-    underlying_env_iteration: chex.Array  # scalar int; resets to 0 at each episode boundary
-    cumulative_env_iteration: chex.Array  # scalar int; never resets; the key passed to communication_scheme_fn
-    episode_index: chex.Array  # scalar int; which episode we are in; +1 at each boundary; keys the re-route
-    episode_horizon: chex.Array  # scalar int; this episode's underlying_env_steps_per_episode (from the route)
-
-    # Communication schedule: the active block, stored flat as its who_speaks /
-    # total_num_rounds (re-fetched from communication_scheme_fn on each underlying-env
-    # step, keyed by cumulative_env_iteration), plus the cursors that walk it. The
-    # instantaneous who-speaks for the current round is
-    # active_who_speaks[communication_round_iterator].
-    active_who_speaks: chex.Array  # [num_rounds (padded), num_speakers]
-    active_total_num_rounds: chex.Array  # scalar int: real round count of the active block (excludes padding)
-    communication_round_iterator: (
-        chex.Array
-    )  # scalar int: round within the active block (0..total_num_rounds-1); advances once per completed (two-step) round
-    cumulative_communication_round_iterator: chex.Array  # scalar int: total step_env calls (two per who_speaks round); never resets
-
-    # Two-stage rounds: each who_speaks round spans TWO step_env iterations. The
-    # speaker emits an utterance on UTTERANCE_STAGE, then the listener emits a belief
-    # action on BELIEF_STAGE, which completes the round and advances
-    # communication_round_iterator.
-    communicative_round_stage: chex.Array  # scalar int: UTTERANCE_STAGE or BELIEF_STAGE
 
     # World: the true DecPOMDP state of each game.
     game_states: chex.Array  # [num_games]
@@ -183,7 +141,7 @@ class StackedSignificationDecPOMDP:
         num_agents: int,
         all_env_parameters: FlexibleEnvParams,
         optimal_policies: Sequence[Sequence[OptimalPolicy]],
-        routing_fn: RouteFn,
+        assignment_fn: AssignmentFn,
         communication_scheme_fn: CommunicationSchemeFn,
         utterance_action_dim: int,
         skip_first_communication_step: bool,
@@ -196,14 +154,14 @@ class StackedSignificationDecPOMDP:
                 Each entry is an arbitrary callable Categorical(belief) -> Categorical(action).
                 Stored separately from all_env_parameters because callables are not
                 traceable pytree data and cannot be gathered by a traced index.
-            routing_fn
+            assignment_fn
             communication_scheme_fn: Maps the cumulative in-game iteration to the
                 CommunicationScheme in force at that iteration (see communication_scheme.py).
             utterance_action_dim: Constant length of each agent's utterance-action vector.
         """
         self.num_agents = num_agents
         self.all_env_parameters = all_env_parameters
-        self.routing_fn = routing_fn
+        self.assignment_fn = assignment_fn
         self.communication_scheme_fn = communication_scheme_fn
         self.utterance_action_dim = utterance_action_dim
         self.act_on_reset_before_communicating = skip_first_communication_step
@@ -337,9 +295,9 @@ class StackedSignificationDecPOMDP:
             belief inputs are meaningless -> beliefs and estimated_beliefs are NaN.
         """
         num_games = state.game_states.shape[0]
-        partner_agent = self._partner_agent(state.agent_game_assignment, state.agent_role_assignment, num_games)
+        partner_agent = self._partner_agent(state.game_roles.agent_game_assignment, state.game_roles.agent_role_assignment, num_games)
 
-        on_utterance_stage = state.communicative_round_stage == UTTERANCE_STAGE
+        on_utterance_stage = state.dialog.communicative_round_stage == UTTERANCE_STAGE
         # beliefs[i] = agent i's own belief (subject-indexed as stored).
         beliefs = jnp.where(on_utterance_stage, state.true_agent_belief_states, jnp.nan)
         # estimated_beliefs[i] = estimate of agent i's partner (the receiver it is engaged
@@ -511,14 +469,14 @@ class StackedSignificationDecPOMDP:
         act_key, boundary_key, obs_key = jax.random.split(key, 3)
 
         # This round's speakers, over ROLES, mapped to a per-agent mask.
-        who_speaks_this_round = state.active_who_speaks[state.communication_round_iterator]  # [num_roles]
-        agent_speaks_binary_mask = who_speaks_this_round[state.agent_role_assignment].astype(bool)  # [num_agents]
+        who_speaks_this_round = state.dialog.active_who_speaks[state.dialog.communication_round_iterator]  # [num_roles]
+        agent_speaks_binary_mask = who_speaks_this_round[state.game_roles.agent_role_assignment].astype(bool)  # [num_agents]
         # ...and this round's listeners:
-        agent_listens_binary_mask = who_speaks_this_round[1 - state.agent_role_assignment].astype(bool)  # [num_agents]
+        agent_listens_binary_mask = who_speaks_this_round[1 - state.game_roles.agent_role_assignment].astype(bool)  # [num_agents]
 
         # Useful predicates
-        on_utterance_stage = state.communicative_round_stage == UTTERANCE_STAGE
-        on_belief_stage = state.communicative_round_stage == BELIEF_STAGE
+        on_utterance_stage = state.dialog.communicative_round_stage == UTTERANCE_STAGE
+        on_belief_stage = state.dialog.communicative_round_stage == BELIEF_STAGE
 
         # === Bit 1: utterance stage =========================================
         # On the UTTERANCE_STAGE the utterance_actions have been freshly populated.
@@ -581,7 +539,7 @@ class StackedSignificationDecPOMDP:
         #
         # A round completes on its belief stage; that completion is an "act" (the env
         # steps) when it is the block's last REAL round (total_num_rounds drops padding).
-        is_last_round = state.communication_round_iterator == state.active_total_num_rounds - 1
+        is_last_round = state.dialog.communication_round_iterator == state.dialog.active_total_num_rounds - 1
         is_act = on_belief_stage & is_last_round
 
         # The stage toggles every call. The round cursor only moves when a round
@@ -590,20 +548,20 @@ class StackedSignificationDecPOMDP:
         # This keeps track of which communication round we are in within a block.
         next_round_cursor = jnp.where(
             on_belief_stage,
-            jnp.where(is_act, 0, state.communication_round_iterator + 1),
-            state.communication_round_iterator,
+            jnp.where(is_act, 0, state.dialog.communication_round_iterator + 1),
+            state.dialog.communication_round_iterator,
         )
 
         # Env iterations advance only on an act.
         act_increment = is_act.astype(jnp.int32)
-        next_cumulative_env_iteration = state.cumulative_env_iteration + act_increment
+        next_cumulative_env_iteration = state.game_counters.cumulative_env_iteration + act_increment
 
         # On an act, fetch the NEXT block, keyed by the new cumulative_env_iteration;
         # otherwise keep walking the current one. communication_scheme_fn is a pure,
         # shape-stable gather, so compute it unconditionally and select with where.
         next_block = self.communication_scheme_fn(next_cumulative_env_iteration)
-        next_active_who_speaks = jnp.where(is_act, next_block.who_speaks, state.active_who_speaks)
-        next_active_total_num_rounds = jnp.where(is_act, next_block.total_num_rounds, state.active_total_num_rounds)
+        next_active_who_speaks = jnp.where(is_act, next_block.who_speaks, state.dialog.active_who_speaks)
+        next_active_total_num_rounds = jnp.where(is_act, next_block.total_num_rounds, state.dialog.active_total_num_rounds)
 
         # === Bit 4: act (the underlying world step) =========================
         # On the block's last belief stage (is_act) every game takes one DecPOMDP step:
@@ -616,9 +574,9 @@ class StackedSignificationDecPOMDP:
             return self._step_underlying_env(
                 act_key,
                 state.game_states,
-                state.game_types,
-                state.agent_game_assignment,
-                state.agent_role_assignment,
+                state.game_roles.game_types,
+                state.game_roles.agent_game_assignment,
+                state.game_roles.agent_role_assignment,
                 next_true_agent_belief_states,
                 next_estimated_agent_belief_states,
             )
@@ -654,11 +612,11 @@ class StackedSignificationDecPOMDP:
         # schedule (already advanced to the next block in bit 3) keep going. This step's
         # reported reward/action stays the ENDING episode's final act (below); the new
         # episode's act-first only primes its beliefs/state.
-        next_underlying_env_iteration = state.underlying_env_iteration + act_increment
-        is_boundary = is_act & (next_underlying_env_iteration >= state.episode_horizon)
+        next_underlying_env_iteration = state.game_counters.underlying_env_iteration + act_increment
+        is_boundary = is_act & (next_underlying_env_iteration >= state.game_counters.episode_horizon)
 
         def begin_new_episode(_):
-            new_episode_index = state.episode_index + 1
+            new_episode_index = state.game_counters.episode_index + 1
             init = self._begin_episode(boundary_key, new_episode_index)
             return (
                 init["agent_game_assignment"],
@@ -675,14 +633,14 @@ class StackedSignificationDecPOMDP:
 
         def continue_episode(_):
             return (
-                state.agent_game_assignment,
-                state.agent_role_assignment,
-                state.game_types,
+                state.game_roles.agent_game_assignment,
+                state.game_roles.agent_role_assignment,
+                state.game_roles.game_types,
                 game_states_after_act,
                 true_beliefs_after_act,
                 estimated_beliefs_after_act,
-                state.episode_horizon,
-                state.episode_index,
+                state.game_counters.episode_horizon,
+                state.game_counters.episode_index,
                 next_underlying_env_iteration,
                 next_agent_utterance_actions_unrendered,
             )
@@ -701,19 +659,25 @@ class StackedSignificationDecPOMDP:
         ) = jax.lax.cond(is_boundary, begin_new_episode, continue_episode, operand=None)
 
         state = state.replace(
-            communicative_round_stage=next_stage,
-            communication_round_iterator=next_round_cursor,
-            cumulative_communication_round_iterator=(state.cumulative_communication_round_iterator + 1),
-            underlying_env_iteration=ep_underlying_env_iteration,
-            cumulative_env_iteration=next_cumulative_env_iteration,
-            episode_index=ep_episode_index,
-            episode_horizon=ep_episode_horizon,
-            active_who_speaks=next_active_who_speaks,
-            active_total_num_rounds=next_active_total_num_rounds,
+            dialog=DialogState(
+                communicative_round_stage=next_stage,
+                communication_round_iterator=next_round_cursor,
+                cumulative_communication_round_iterator=(state.dialog.cumulative_communication_round_iterator + 1),
+                active_who_speaks=next_active_who_speaks,
+                active_total_num_rounds=next_active_total_num_rounds,
+            ),
+            game_roles=GameRoleState(
+                agent_game_assignment=ep_agent_game_assignment,
+                agent_role_assignment=ep_agent_role_assignment,
+                game_types=ep_game_types,
+            ),
+            game_counters=GameCountersState(
+                underlying_env_iteration=ep_underlying_env_iteration,
+                cumulative_env_iteration=next_cumulative_env_iteration,
+                episode_index=ep_episode_index,
+                episode_horizon=ep_episode_horizon,
+            ),
             agent_utterance_actions_unrendered=ep_utterances,
-            agent_game_assignment=ep_agent_game_assignment,
-            agent_role_assignment=ep_agent_role_assignment,
-            game_types=ep_game_types,
             game_states=ep_game_states,
             true_agent_belief_states=ep_true_beliefs,
             estimated_agent_belief_states=ep_estimated_beliefs,
@@ -769,7 +733,7 @@ class StackedSignificationDecPOMDP:
     def _begin_episode(self, key, episode_index):
         """Route a fresh episode and produce its initial fields.
 
-        Assigns agents to games/roles via routing_fn (keyed by episode_index), samples
+        Assigns agents to games/roles via assignment_fn (keyed by episode_index), samples
         each game's initial world state, and sets each agent's initial belief (and the
         initial estimate about it, which equals its own prior) from the env params.
 
@@ -784,7 +748,7 @@ class StackedSignificationDecPOMDP:
         episodes), so the act-first behavior applies to every episode.
         """
         routing_key, state_key, key = jax.random.split(key, 3)
-        route = self.routing_fn(key=routing_key, iteration=episode_index)
+        route = self.assignment_fn(key=routing_key, iteration=episode_index)
 
         agent_role_assignment = route.agent_role_assignment  # [num_agents]
         game_types_per_game = route.game_set  # [num_games]
@@ -875,24 +839,30 @@ class StackedSignificationDecPOMDP:
         active_scheme = self.communication_scheme_fn(underlying_iteration)
 
         state = StackedSignificationState(
+            dialog=DialogState(
+                active_who_speaks=active_scheme.who_speaks,
+                active_total_num_rounds=active_scheme.total_num_rounds,
+                communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
+                cumulative_communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
+                # Reset starts on the utterance stage (the speaker emits first).
+                communicative_round_stage=jnp.asarray(UTTERANCE_STAGE, dtype=jnp.int32),
+            ),
+            game_roles=GameRoleState(
+                agent_game_assignment=init["agent_game_assignment"],
+                agent_role_assignment=init["agent_role_assignment"],
+                game_types=init["game_types"],
+            ),
+            game_counters=GameCountersState(
+                underlying_env_iteration=underlying_iteration,
+                cumulative_env_iteration=underlying_iteration,
+                episode_index=jnp.asarray(0, dtype=jnp.int32),
+                episode_horizon=init["episode_horizon"],
+            ),
             # No utterances yet at reset: unrendered starts as a zero vector per agent
             # (sized by utterance_action_dim) so the utterance stage can write into it;
             # rendered is unused for now.
             agent_utterance_actions_unrendered=jnp.zeros((self.num_agents, self.utterance_action_dim), dtype=jnp.float32),
             agent_utterance_actions_rendered=None,
-            agent_game_assignment=init["agent_game_assignment"],
-            agent_role_assignment=init["agent_role_assignment"],
-            game_types=init["game_types"],
-            underlying_env_iteration=underlying_iteration,
-            cumulative_env_iteration=underlying_iteration,
-            episode_index=jnp.asarray(0, dtype=jnp.int32),
-            episode_horizon=init["episode_horizon"],
-            active_who_speaks=active_scheme.who_speaks,
-            active_total_num_rounds=active_scheme.total_num_rounds,
-            communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
-            cumulative_communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
-            # Reset starts on the utterance stage (the speaker emits first).
-            communicative_round_stage=jnp.asarray(UTTERANCE_STAGE, dtype=jnp.int32),
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             estimated_agent_belief_states=estimated_agent_belief_states,
@@ -916,7 +886,7 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     prints the schedule as it advances so the stage / round / env-iteration cadence is
     visible. Returns ``(env, final_state)``.
     """
-    from communication.routing import simple_routing_fn
+    from communication.game_role_assignment import simple_assignment_fn
     from communication.communication_scheme import a_to_b_thrice_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
@@ -926,7 +896,7 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
         num_agents=10,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(num_agents=10, game_type_id=0),
+        assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=a_to_b_thrice_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
@@ -947,10 +917,10 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
 
     def fmt(st):
         return (
-            f"stage={int(st.communicative_round_stage)} "
-            f"round={int(st.communication_round_iterator)} "
-            f"env_iter={int(st.underlying_env_iteration)} "
-            f"comm={int(st.cumulative_communication_round_iterator)}"
+            f"stage={int(st.dialog.communicative_round_stage)} "
+            f"round={int(st.dialog.communication_round_iterator)} "
+            f"env_iter={int(st.game_counters.underlying_env_iteration)} "
+            f"comm={int(st.dialog.cumulative_communication_round_iterator)}"
         )
 
     print("=== a_to_b_thrice example (1 block = 3 rounds = 6 step_env calls) ===")
@@ -966,7 +936,7 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
 if __name__ == "__main__":
     a_to_b_thrice_example(jax.random.key(0))
 
-    from communication.routing import simple_routing_fn
+    from communication.game_role_assignment import simple_assignment_fn
     from communication.communication_scheme import b_to_a_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
@@ -977,7 +947,7 @@ if __name__ == "__main__":
         num_agents=10,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(num_agents=10, game_type_id=0),
+        assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
@@ -992,26 +962,26 @@ if __name__ == "__main__":
     assert not jnp.any(jnp.isnan(obs_estimated)), "utterance-stage obs keeps estimated beliefs"
     print("=== communicate-first reset ===")
     print("game_states:        ", state.game_states)
-    print("underlying_iter:    ", state.underlying_env_iteration)
-    print("active who_speaks:  ", state.active_who_speaks.tolist())
-    print("active rounds:      ", state.active_total_num_rounds)
+    print("underlying_iter:    ", state.game_counters.underlying_env_iteration)
+    print("active who_speaks:  ", state.dialog.active_who_speaks.tolist())
+    print("active rounds:      ", state.dialog.active_total_num_rounds)
     print(
         "round iters (u,c):  ",
-        state.communication_round_iterator,
-        state.cumulative_communication_round_iterator,
+        state.dialog.communication_round_iterator,
+        state.dialog.cumulative_communication_round_iterator,
     )
-    print("round stage:        ", state.communicative_round_stage)
+    print("round stage:        ", state.dialog.communicative_round_stage)
     print("true beliefs[0]:    ", state.true_agent_belief_states[0])
-    assert state.underlying_env_iteration == 0, "communicate-first takes no env step at reset"
-    assert state.communication_round_iterator == 0, "round cursor starts at 0"
-    assert state.communicative_round_stage == UTTERANCE_STAGE, "reset starts on the utterance stage"
+    assert state.game_counters.underlying_env_iteration == 0, "communicate-first takes no env step at reset"
+    assert state.dialog.communication_round_iterator == 0, "round cursor starts at 0"
+    assert state.dialog.communicative_round_stage == UTTERANCE_STAGE, "reset starts on the utterance stage"
 
     # reset (act-first path): one joint action + belief updates before communicating.
     act_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(num_agents=10, game_type_id=0),
+        assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=True,
@@ -1019,10 +989,10 @@ if __name__ == "__main__":
     act_state, _ = act_env.reset(jax.random.key(1))
     print("=== act-first reset ===")
     print("game_states:        ", act_state.game_states)
-    print("underlying_iter:    ", act_state.underlying_env_iteration)
+    print("underlying_iter:    ", act_state.game_counters.underlying_env_iteration)
     print("true beliefs[0]:    ", act_state.true_agent_belief_states[0])
     print("estimate about agent 0:", act_state.estimated_agent_belief_states[0])
-    assert act_state.underlying_env_iteration == 1, "act-first advances the env once at reset"
+    assert act_state.game_counters.underlying_env_iteration == 1, "act-first advances the env once at reset"
 
     # Direct dispatch check: each agent's belief is routed through its
     # (game_type, role) policy. Both guessing-game roles are identity here, so we
@@ -1049,7 +1019,7 @@ if __name__ == "__main__":
         num_agents=10,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(num_agents=10, game_type_id=0),
+        assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=a_to_b_thrice_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
@@ -1067,7 +1037,7 @@ if __name__ == "__main__":
     # bit 1b's wiring to be visible.
     other_est = s0.true_agent_belief_states.at[:, 0].add(0.5)
     other_est = other_est / other_est.sum(axis=-1, keepdims=True)
-    role0 = s0.agent_role_assignment == 0
+    role0 = s0.game_roles.agent_role_assignment == 0
     role1 = ~role0
 
     # Bit 1: the utterance stage stashes ONLY the speaking role's (role 0 in a_to_b)
@@ -1098,7 +1068,7 @@ if __name__ == "__main__":
     # get_obs indexing: on the utterance stage, estimated_beliefs is the estimate of the
     # RECEIVER (partner) the sender is engaged with -- the partner's subject-indexed row.
     us_beliefs, us_estimated, us_utterances = sched_env.get_obs(jax.random.key(0), s0)
-    partner = sched_env._partner_agent(s0.agent_game_assignment, s0.agent_role_assignment, s0.game_states.shape[0])
+    partner = sched_env._partner_agent(s0.game_roles.agent_game_assignment, s0.game_roles.agent_role_assignment, s0.game_states.shape[0])
     assert jnp.all(us_beliefs == s0.true_agent_belief_states), "beliefs[i] is agent i's own belief"
     assert jnp.all(
         us_estimated == s0.estimated_agent_belief_states[partner]
@@ -1121,10 +1091,10 @@ if __name__ == "__main__":
 
     def fmt(st):
         return (
-            f"stage={int(st.communicative_round_stage)} "
-            f"round={int(st.communication_round_iterator)} "
-            f"env_iter={int(st.underlying_env_iteration)} "
-            f"comm={int(st.cumulative_communication_round_iterator)}"
+            f"stage={int(st.dialog.communicative_round_stage)} "
+            f"round={int(st.dialog.communication_round_iterator)} "
+            f"env_iter={int(st.game_counters.underlying_env_iteration)} "
+            f"comm={int(st.dialog.cumulative_communication_round_iterator)}"
         )
 
     print("=== step_env scheduling walk (a_to_b_thrice: 3 rounds/block) ===")
@@ -1156,9 +1126,9 @@ if __name__ == "__main__":
     assert s.last_agent_rewards.shape == (10,), "reward is per-agent"
     assert s.last_agent_actions.shape == (10,), "action is per-agent"
     assert s.last_agent_observations.shape == (10,), "observation is per-agent"
-    assert int(s.underlying_env_iteration) == 1, "one block (6 stages) == one env step"
-    assert int(s.communication_round_iterator) == 0, "cursor wrapped after the act"
-    assert int(s.communicative_round_stage) == UTTERANCE_STAGE, "back to utterance after the act"
+    assert int(s.game_counters.underlying_env_iteration) == 1, "one block (6 stages) == one env step"
+    assert int(s.dialog.communication_round_iterator) == 0, "cursor wrapped after the act"
+    assert int(s.dialog.communicative_round_stage) == UTTERANCE_STAGE, "back to utterance after the act"
     # Bit 4: the act ran a real DecPOMDP step -> beliefs stay normalized after the obs update.
     assert jnp.allclose(s.true_agent_belief_states.sum(-1), 1.0), "act keeps beliefs normalized"
     print("  game_states reset->now:", s0.game_states.tolist(), "->", s.game_states.tolist())
@@ -1170,7 +1140,7 @@ if __name__ == "__main__":
         num_agents=10,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(num_agents=10, underlying_env_steps_per_episode=2),
+        assignment_fn=simple_assignment_fn(num_agents=10, underlying_env_steps_per_episode=2),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
@@ -1181,12 +1151,12 @@ if __name__ == "__main__":
     # Valid (full-support) estimate; a padding-state one-hot would break the act.
     other_est3 = b.true_agent_belief_states.at[:, 0].add(0.5)
     other_est3 = other_est3 / other_est3.sum(axis=-1, keepdims=True)
-    assert int(b.episode_index) == 0 and int(b.episode_horizon) == 2
+    assert int(b.game_counters.episode_index) == 0 and int(b.game_counters.episode_horizon) == 2
     print("=== episode boundary walk (horizon=2, b_to_a) ===")
     for t in range(4):
         b, _, _ = boundary_env.step_env(jax.random.key(100 + t), b, utt3, other_est3, valid3)
-        print(f"  step {t}: env_iter={int(b.underlying_env_iteration)} " f"cum_env={int(b.cumulative_env_iteration)} episode={int(b.episode_index)}")
-    assert int(b.episode_index) == 1, "a new episode began at the horizon"
-    assert int(b.underlying_env_iteration) == 0, "per-episode env iter reset at the boundary"
-    assert int(b.cumulative_env_iteration) == 2, "cumulative env iter keeps counting"
+        print(f"  step {t}: env_iter={int(b.game_counters.underlying_env_iteration)} " f"cum_env={int(b.game_counters.cumulative_env_iteration)} episode={int(b.game_counters.episode_index)}")
+    assert int(b.game_counters.episode_index) == 1, "a new episode began at the horizon"
+    assert int(b.game_counters.underlying_env_iteration) == 0, "per-episode env iter reset at the boundary"
+    assert int(b.game_counters.cumulative_env_iteration) == 2, "cumulative env iter keeps counting"
     print("ok: episode boundary re-routes and resets the per-episode counters")

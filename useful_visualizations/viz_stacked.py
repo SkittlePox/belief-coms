@@ -38,7 +38,7 @@ from communication.stacked_signification_decpomdp import (
 )
 from envs.env_assembly import assemble_environments
 from envs.guessing_game import guessing_game_spec
-from communication.routing import simple_routing_fn
+from communication.game_role_assignment import simple_assignment_fn
 from communication.communication_scheme import b_to_a_scheme_fn
 
 from . import _figures as F
@@ -70,7 +70,7 @@ def _build_env():
         num_agents=NUM_AGENTS,
         all_env_parameters=stacked_params,
         optimal_policies=optimal_policies,
-        routing_fn=simple_routing_fn(num_agents=NUM_AGENTS, underlying_env_steps_per_episode=4),
+        assignment_fn=simple_assignment_fn(num_agents=NUM_AGENTS, underlying_env_steps_per_episode=4),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
         skip_first_communication_step=False,
@@ -113,7 +113,7 @@ def _rollout(env):
         # An act step advances cumulative_env_iteration; only then is the pre-act substate
         # (communication resolved, world not yet stepped) a distinct, informative frame, so
         # we splice it in as sub-frame "a" ahead of the post-act world-step frame "b".
-        is_act = int(state.cumulative_env_iteration) > int(pre_act.cumulative_env_iteration)
+        is_act = int(state.game_counters.cumulative_env_iteration) > int(pre_act.game_counters.cumulative_env_iteration)
         if is_act:
             snaps.append(tagged(pre_act, t, "pre_act"))
         snaps.append(tagged(state, t, "act" if is_act else "comm"))
@@ -123,16 +123,16 @@ def _rollout(env):
 def _snapshot(state):
     """Pull the plottable fields out of a StackedSignificationState as numpy."""
     return dict(
-        agent_game=np.asarray(state.agent_game_assignment),
-        agent_role=np.asarray(state.agent_role_assignment),
+        agent_game=np.asarray(state.game_roles.agent_game_assignment),
+        agent_role=np.asarray(state.game_roles.agent_role_assignment),
         game_states=np.asarray(state.game_states),
-        stage=int(state.communicative_round_stage),
-        round_cursor=int(state.communication_round_iterator),
-        total_rounds=int(state.active_total_num_rounds),
-        env_iter=int(state.underlying_env_iteration),
-        cum_env=int(state.cumulative_env_iteration),
-        cum_round=int(state.cumulative_communication_round_iterator),
-        episode=int(state.episode_index),
+        stage=int(state.dialog.communicative_round_stage),
+        round_cursor=int(state.dialog.communication_round_iterator),
+        total_rounds=int(state.dialog.active_total_num_rounds),
+        env_iter=int(state.game_counters.underlying_env_iteration),
+        cum_env=int(state.game_counters.cumulative_env_iteration),
+        cum_round=int(state.dialog.cumulative_communication_round_iterator),
+        episode=int(state.game_counters.episode_index),
         true_beliefs=np.asarray(state.true_agent_belief_states),
         est_beliefs=np.asarray(state.estimated_agent_belief_states),
         rewards=np.asarray(state.last_agent_rewards),
