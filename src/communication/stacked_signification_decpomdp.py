@@ -897,15 +897,15 @@ class EnvironmentConfig:
             ``(utterance_image_dim, utterance_image_dim)``.
         skip_first_communication_step: If set, every episode takes one underlying-env
             step (act) before any communication (``act_on_reset_before_communicating``).
-        games: Names of the game types to assemble, in order -- game type index i is
-            ``games[i]``. Empty means "every registered game" (in ``GAME_SPECS`` order).
+        only_games: Names of the game types to assemble, in order -- game type index i is
+            ``only_games[i]``. Empty means "every registered game" (in ``GAME_SPECS`` order).
             Names must be keys of ``envs.env_assembly.GAME_SPECS``.
     """
 
     utterance_action_dim: int = 12  # 2 splines x 6 control points; multiple of 6 to render
-    utterance_image_dim: int = 64
+    utterance_image_dim: int = 32
     skip_first_communication_step: bool = False
-    games: Tuple[str, ...] = ()
+    only_games: Tuple[str, ...] = ()    # defaults to all games when left empty
 
     def build(
         self,
@@ -917,7 +917,7 @@ class EnvironmentConfig:
         # dependency on the assembly layer, matching the local imports in the examples.
         from envs.env_assembly import assemble_environments, GAME_SPECS
 
-        game_names = self.games or tuple(GAME_SPECS.keys())
+        game_names = self.only_games or tuple(GAME_SPECS.keys())
         specs = [GAME_SPECS[name] for name in game_names]
         stacked_params, optimal_policies = assemble_environments(specs)
 

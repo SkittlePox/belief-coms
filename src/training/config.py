@@ -29,6 +29,8 @@ class ExperimentConfig:
     """Full run config."""
 
     jax_seed: int = 42
+    # Number of _update_step iterations the training loop scans through.
+    num_epochs: int = 100
     role_assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
     communication: CommunicationConfig = dataclasses.field(default_factory=CommunicationConfig)
     environment: EnvironmentConfig = dataclasses.field(default_factory=EnvironmentConfig)
