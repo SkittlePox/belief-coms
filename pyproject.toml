@@ -10,6 +10,7 @@ dependencies = [
     "flax>=0.10.4",
     "jaxmarl>=0.1.0",
     "memo-lang>=1.2.23",
+    "optax>=0.2.5",
     "plotly>=6.8.0",
     "tyro>=1.0.15",
     "wandb>=0.28.0",

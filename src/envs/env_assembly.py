@@ -35,6 +35,16 @@ from envs.guessing_game import guessing_game_spec
 EnvSpec = Callable[[], Tuple[FlexibleEnvParams, Sequence[OptimalPolicy]]]
 
 
+# Registry of every game type available to a run, keyed by name. A game's TYPE INDEX
+# (the value stored in ``game_set`` / read by ``game_type_id``) is its position in the
+# list handed to ``assemble_environments`` -- for a run that assembles every registered
+# game, that is this dict's insertion order. Add a new game type by writing its EnvSpec
+# and registering it here; it then becomes selectable from the config.
+GAME_SPECS: dict[str, EnvSpec] = {
+    "guessing_game": guessing_game_spec,
+}
+
+
 def _pad_params(p: FlexibleEnvParams, target_states, target_actions, target_obs) -> FlexibleEnvParams:
     """Zero-pad a single env's tensors up to common (S, A, O) maxima.
 

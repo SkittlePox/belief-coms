@@ -1,8 +1,9 @@
+import dataclasses
 import jax, chex
 import jax.numpy as jnp
 import distrax
 from flax import struct
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, Tuple
 from functools import partial
 from communication.game_role_assignment import AssignmentFn
 from communication.communication_scheme import CommunicationSchemeFn
@@ -103,7 +104,7 @@ class StackedSignificationState:
     game_counters: GameCountersState
 
     # Communication: the agents' utterance actions (raw and rendered). Populated by
-    # the communication phase of step_env; None after reset.
+    # the communication phase of step_env; None after reset.    NOTE: May want to get rid of rendered utterances
     agent_utterance_actions_unrendered: chex.Array
     agent_utterance_actions_rendered: chex.Array
 
@@ -165,6 +166,10 @@ class StackedSignificationDecPOMDP:
         self.communication_scheme_fn = communication_scheme_fn
         self.utterance_action_dim = utterance_action_dim
         self.act_on_reset_before_communicating = skip_first_communication_step
+
+        # The (padded) world-state cardinality: the length of every belief vector agents
+        # read and emit, shared by all game types (padding makes it uniform).
+        self.belief_dim = all_env_parameters.initial_state_distribution.shape[-1]
 
         # Policy table indexed [game_type][role]. Flatten once for lax.switch
         # dispatch: the table is static (Python-level), so the flat list of
@@ -876,6 +881,55 @@ class StackedSignificationDecPOMDP:
         return state, self.get_obs(obs_key, state)
 
 
+@dataclasses.dataclass
+class EnvironmentConfig:
+    """Tyro-facing knobs for building the StackedSignificationDecPOMDP.
+
+    Fields:
+        utterance_action_dim: Length of each agent's (flat, unrendered) utterance-action
+            vector. Shared with the utterance agents (whose output must match), so
+            make_train reads it from here and feeds it to both the env and the agent build.
+        utterance_image_dim: Side length of the square canvas a flat utterance is rendered
+            onto before a belief agent's conv encoder consumes it (see
+            ``tools.utterance_rendering``); the belief agents' ``input_utterance_shape`` is
+            ``(utterance_image_dim, utterance_image_dim)``.
+        skip_first_communication_step: If set, every episode takes one underlying-env
+            step (act) before any communication (``act_on_reset_before_communicating``).
+        games: Names of the game types to assemble, in order -- game type index i is
+            ``games[i]``. Empty means "every registered game" (in ``GAME_SPECS`` order).
+            Names must be keys of ``envs.env_assembly.GAME_SPECS``.
+    """
+
+    utterance_action_dim: int = 4
+    utterance_image_dim: int = 64
+    skip_first_communication_step: bool = False
+    games: Tuple[str, ...] = ()
+
+    def build(
+        self,
+        num_agents: int,
+        assignment_fn: AssignmentFn,
+        communication_scheme_fn: CommunicationSchemeFn,
+    ) -> "StackedSignificationDecPOMDP":
+        # Imported here (not at module top) to keep the env-definition module free of a
+        # dependency on the assembly layer, matching the local imports in the examples.
+        from envs.env_assembly import assemble_environments, GAME_SPECS
+
+        game_names = self.games or tuple(GAME_SPECS.keys())
+        specs = [GAME_SPECS[name] for name in game_names]
+        stacked_params, optimal_policies = assemble_environments(specs)
+
+        return StackedSignificationDecPOMDP(
+            num_agents=num_agents,
+            all_env_parameters=stacked_params,
+            optimal_policies=optimal_policies,
+            assignment_fn=assignment_fn,
+            communication_scheme_fn=communication_scheme_fn,
+            utterance_action_dim=self.utterance_action_dim,
+            skip_first_communication_step=self.skip_first_communication_step,
+        )
+
+
 def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     """Build a small stacked env driven by ``a_to_b_thrice_scheme_fn`` and walk one block.
 
@@ -1155,7 +1209,10 @@ if __name__ == "__main__":
     print("=== episode boundary walk (horizon=2, b_to_a) ===")
     for t in range(4):
         b, _, _ = boundary_env.step_env(jax.random.key(100 + t), b, utt3, other_est3, valid3)
-        print(f"  step {t}: env_iter={int(b.game_counters.underlying_env_iteration)} " f"cum_env={int(b.game_counters.cumulative_env_iteration)} episode={int(b.game_counters.episode_index)}")
+        print(
+            f"  step {t}: env_iter={int(b.game_counters.underlying_env_iteration)} "
+            f"cum_env={int(b.game_counters.cumulative_env_iteration)} episode={int(b.game_counters.episode_index)}"
+        )
     assert int(b.game_counters.episode_index) == 1, "a new episode began at the horizon"
     assert int(b.game_counters.underlying_env_iteration) == 0, "per-episode env iter reset at the boundary"
     assert int(b.game_counters.cumulative_env_iteration) == 2, "cumulative env iter keeps counting"

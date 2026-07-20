@@ -18,8 +18,10 @@ import dataclasses
 # renders as subcommands.
 from communication.communication_scheme import CommunicationConfig
 from communication.game_role_assignment import AssignmentConfig, SimpleAssignmentConfig
+from communication.stacked_signification_decpomdp import EnvironmentConfig
 from agents.belief_agents import BeliefAgentConfig
 from agents.utterance_agents import UtteranceAgentConfig
+from training.optimizer import OptimizerConfig
 
 
 @dataclasses.dataclass
@@ -27,8 +29,11 @@ class ExperimentConfig:
     """Full run config."""
 
     jax_seed: int = 42
-    learning_rate: float = 1e-3
     role_assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
     communication: CommunicationConfig = dataclasses.field(default_factory=CommunicationConfig)
+    environment: EnvironmentConfig = dataclasses.field(default_factory=EnvironmentConfig)
     belief_agents: BeliefAgentConfig = dataclasses.field(default_factory=BeliefAgentConfig)
     utterance_agents: UtteranceAgentConfig = dataclasses.field(default_factory=UtteranceAgentConfig)
+    # Separate optimizers: belief and utterance agents are independent populations.
+    belief_optimizer: OptimizerConfig = dataclasses.field(default_factory=OptimizerConfig)
+    utterance_optimizer: OptimizerConfig = dataclasses.field(default_factory=OptimizerConfig)
