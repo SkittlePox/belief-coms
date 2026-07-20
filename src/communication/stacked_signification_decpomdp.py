@@ -889,6 +889,8 @@ class EnvironmentConfig:
         utterance_action_dim: Length of each agent's (flat, unrendered) utterance-action
             vector. Shared with the utterance agents (whose output must match), so
             make_train reads it from here and feeds it to both the env and the agent build.
+            Interpreted as spline control points (6 per quadratic Bezier spline) by
+            ``tools.utterance_rendering``, so it must be a multiple of 6 to be renderable.
         utterance_image_dim: Side length of the square canvas a flat utterance is rendered
             onto before a belief agent's conv encoder consumes it (see
             ``tools.utterance_rendering``); the belief agents' ``input_utterance_shape`` is
@@ -900,7 +902,7 @@ class EnvironmentConfig:
             Names must be keys of ``envs.env_assembly.GAME_SPECS``.
     """
 
-    utterance_action_dim: int = 4
+    utterance_action_dim: int = 12  # 2 splines x 6 control points; multiple of 6 to render
     utterance_image_dim: int = 64
     skip_first_communication_step: bool = False
     games: Tuple[str, ...] = ()
