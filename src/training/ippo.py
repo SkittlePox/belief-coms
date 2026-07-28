@@ -222,6 +222,8 @@ def make_train(config: ExperimentConfig):
 
         # TODO: Ben, figure this out. You wrote the environment as if you never need to reset it. That's fine, but stick to that standard if that's what you want.
         # If that's the case, breaking it into epochs doesn't quite make sense... I need to think about this.
+        # Answer: I decided that the right move is to reset the environment once and then never reset it again.
+        # Epochs are imaginary, they are periods of time where parameters remained fixed. 
 
         # --- Training loop -----------------------------------------------------------
         # Reset the env ONCE up front; the resulting env_state is threaded through the scan
@@ -231,13 +233,16 @@ def make_train(config: ExperimentConfig):
         env_state, _init_obs = env.reset(env_rng)
 
         # One _update_step is a single training iteration; we scan it num_epochs times.
-        # The carry is both populations' train states plus the env state -- each TrainState
-        # already holds its own optimizer state (opt_state) and step, so the carry needs
-        # nothing else. Per-iteration randomness comes in through xs (one key per epoch) so
-        # the carry stays pure state. The scanned output is per-iteration metrics, stacked
-        # along the leading (epoch) axis.
-        def _update_step(carry, step_rng):
-            belief_train_states, utterance_train_states, env_state = carry
+        # The carry is both populations' train states, the env state, and the iteration
+        # counter -- each TrainState already holds its own optimizer state (opt_state) and
+        # step, so nothing else is needed. Per-iteration randomness is derived by folding the
+        # iteration index into the base loop key rather than pre-splitting num_epochs keys via
+        # xs: with potentially very many iterations, materializing that whole key array up
+        # front is wasteful, whereas fold_in costs nothing to carry. The scanned output is
+        # per-iteration metrics, stacked along the leading (epoch) axis.
+        def _update_step(carry, _):
+            belief_train_states, utterance_train_states, env_state, iteration = carry
+            step_rng = jax.random.fold_in(loop_rng, iteration)
 
             # TODO (using step_rng for env steps + action sampling):
             #   1) roll out a trajectory from env_state with the current agents (advancing
@@ -248,13 +253,15 @@ def make_train(config: ExperimentConfig):
             #   4) collect metrics for this iteration.
             metrics = {}
 
-            carry = (belief_train_states, utterance_train_states, env_state)
+            carry = (belief_train_states, utterance_train_states, env_state, iteration + 1)
             return carry, metrics
 
-        (belief_train_states, utterance_train_states, env_state), metrics = jax.lax.scan(
+        initial_carry = (belief_train_states, utterance_train_states, env_state, jnp.asarray(0, dtype=jnp.int32))
+        (belief_train_states, utterance_train_states, env_state, _), metrics = jax.lax.scan(
             _update_step,
-            (belief_train_states, utterance_train_states, env_state),
-            xs=jax.random.split(loop_rng, config.num_epochs),
+            initial_carry,
+            xs=None,
+            length=config.num_epochs,
         )
 
         return dict(
