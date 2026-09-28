@@ -22,6 +22,8 @@ from communication.stacked_signification_decpomdp import EnvironmentConfig
 from agents.belief_agents import BeliefAgentConfig
 from agents.utterance_agents import UtteranceAgentConfig
 from training.optimizer import OptimizerConfig
+from training.agent_execution import AgentInferenceConfig
+from training.ppo_update import PPOConfig
 
 
 @dataclasses.dataclass
@@ -31,11 +33,22 @@ class ExperimentConfig:
     jax_seed: int = 42
     # Number of _update_step iterations the training loop scans through.
     num_epochs: int = 100
+    # Number of env (step_env) stages collected per rollout, i.e. the length of the
+    # env_step scan inside each _update_step.
+    num_steps_per_epoch: int = 128
+    # GAE discount and trace-decay, used to turn rollouts into advantages/value targets.
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
     role_assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
     communication: CommunicationConfig = dataclasses.field(default_factory=CommunicationConfig)
     environment: EnvironmentConfig = dataclasses.field(default_factory=EnvironmentConfig)
     belief_agents: BeliefAgentConfig = dataclasses.field(default_factory=BeliefAgentConfig)
     utterance_agents: UtteranceAgentConfig = dataclasses.field(default_factory=UtteranceAgentConfig)
+    # How agents reason during rollouts: first-order (own network only) or ToM (reasoning
+    # through the partner's model). See training.agent_execution.
+    inference: AgentInferenceConfig = dataclasses.field(default_factory=AgentInferenceConfig)
+    # PPO update hyperparameters (clip range, loss weights, epochs per iteration).
+    ppo: PPOConfig = dataclasses.field(default_factory=PPOConfig)
     # Separate optimizers: belief and utterance agents are independent populations.
     belief_optimizer: OptimizerConfig = dataclasses.field(default_factory=OptimizerConfig)
     utterance_optimizer: OptimizerConfig = dataclasses.field(default_factory=OptimizerConfig)

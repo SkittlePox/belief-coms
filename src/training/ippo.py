@@ -14,6 +14,9 @@ from agents.belief_agents import BeliefAgentConfig
 from agents.utterance_agents import UtteranceAgentConfig
 from tools.utterance_rendering import paint_multiple_splines
 from tools.visualization import plot_belief_states, plot_utterances
+from training.rollout import collect_rollout
+from training.advantages import compute_advantages
+from training.ppo_update import ppo_update
 
 
 def _batched_train_states(network: nn.Module, tx, rng, num_agents, *init_inputs) -> TrainState:
@@ -113,6 +116,16 @@ def make_train(config: ExperimentConfig):
     image_dim = config.environment.utterance_image_dim
     input_utterance_shape = (image_dim, image_dim)
 
+    # Belief agents consume a rendered utterance image; the rollout paints each raw
+    # utterance vector onto an (image_dim x image_dim) canvas via this closure. The leading
+    # rng is unused today but kept in the signature so stochastic rendering (e.g. jitter /
+    # sampled ink) can be added later without touching every call site.
+    render_utterance_fn = lambda rng, utterances: paint_multiple_splines(utterances, image_dim)
+
+    # How agents reason during rollouts (first-order vs. ToM); resolved once here and
+    # threaded into every env_step by collect_rollout.
+    inference_strategy = config.inference.build()
+
     def train(rng):
         # One independent population per role: num_agents belief agents and num_agents
         # utterance agents, each a distinct parameter set + optimizer state batched under
@@ -169,9 +182,9 @@ def make_train(config: ExperimentConfig):
 
             # -> concentration [num_agents, batch, belief_dim], sample [num_agents, batch, belief_dim],
             #    value [num_agents, batch]
-            belief_debug_concentration, belief_debug_sample, belief_debug_value = jax.vmap(
-                belief_forward, in_axes=(0, None, None, None)
-            )(belief_train_states.params, debug_belief, debug_utterance_image, db_bs)
+            belief_debug_concentration, belief_debug_sample, belief_debug_value = jax.vmap(belief_forward, in_axes=(0, None, None, None))(
+                belief_train_states.params, debug_belief, debug_utterance_image, db_bs
+            )
 
             def utterance_forward(params, own_belief, estimate_belief, sample_key):
                 dist, value = utterance_train_states.apply_fn(params, own_belief, estimate_belief)
@@ -188,17 +201,13 @@ def make_train(config: ExperimentConfig):
             # leading (batch) axis, so we vmap it once more over the agent axis. Requires
             # utterance_action_dim to be a multiple of 6 (6 params per spline).
             # -> [num_agents, batch, utterance_image_dim, utterance_image_dim]
-            utterance_debug_render = jax.vmap(lambda utterances: paint_multiple_splines(utterances, image_dim))(
-                utterance_debug_sample
-            )
+            utterance_debug_render = jax.vmap(lambda utterances: paint_multiple_splines(utterances, image_dim))(utterance_debug_sample)
 
             # Plot one shared-input batch element (index 0) across every agent, so the spread
             # between panels reflects parameter-init randomness alone. This is debug output,
             # so it saves itself to disk here rather than pushing figures out to the caller.
             agent_titles = [f"agent {i}" for i in range(num_agents)]
-            belief_debug_fig = plot_belief_states(
-                belief_debug_sample[:, 0], titles=agent_titles, fig_title="Sampled beliefs (debug, batch 0)"
-            )
+            belief_debug_fig = plot_belief_states(belief_debug_sample[:, 0], titles=agent_titles, fig_title="Sampled beliefs (debug, batch 0)")
             utterance_debug_fig = plot_utterances(
                 utterance_debug_render[:, 0], image_dim=image_dim, titles=agent_titles, fig_title="Sampled utterances (debug, batch 0)"
             )
@@ -220,17 +229,12 @@ def make_train(config: ExperimentConfig):
 
         debug_outputs = run_debug()
 
-        # TODO: Ben, figure this out. You wrote the environment as if you never need to reset it. That's fine, but stick to that standard if that's what you want.
-        # If that's the case, breaking it into epochs doesn't quite make sense... I need to think about this.
-        # Answer: I decided that the right move is to reset the environment once and then never reset it again.
-        # Epochs are imaginary, they are periods of time where parameters remained fixed. 
-
         # --- Training loop -----------------------------------------------------------
         # Reset the env ONCE up front; the resulting env_state is threaded through the scan
         # carry so the rollout continues across update steps rather than restarting each
         # iteration. (The stacked env never terminates -- it re-routes at episode boundaries
         # internally -- so a single reset is all it needs; see StackedSignificationDecPOMDP.)
-        env_state, _init_obs = env.reset(env_rng)
+        env_state, init_obs = env.reset(env_rng)
 
         # One _update_step is a single training iteration; we scan it num_epochs times.
         # The carry is both populations' train states, the env state, and the iteration
@@ -241,23 +245,58 @@ def make_train(config: ExperimentConfig):
         # front is wasteful, whereas fold_in costs nothing to carry. The scanned output is
         # per-iteration metrics, stacked along the leading (epoch) axis.
         def _update_step(carry, _):
-            belief_train_states, utterance_train_states, env_state, iteration = carry
+            belief_train_states, utterance_train_states, env_state, last_obs, iteration = carry
             step_rng = jax.random.fold_in(loop_rng, iteration)
+            rollout_rng, update_rng = jax.random.split(step_rng)
 
-            # TODO (using step_rng for env steps + action sampling):
-            #   1) roll out a trajectory from env_state with the current agents (advancing
-            #      env_state via env.step_env, carrying the final env_state forward),
-            #   2) compute returns / advantages,
-            #   3) form the PPO losses for each population and take a gradient step via
-            #      TrainState.apply_gradients (vmapped over the num_agents axis),
-            #   4) collect metrics for this iteration.
-            metrics = {}
+            # 1) Roll out a trajectory: scan env_step num_steps times, running both agent
+            #    populations each stage and stepping the env. The final env_state/last_obs
+            #    are threaded back into the carry so the rollout continues across iterations;
+            #    transitions carries a leading [num_steps] axis (see training.rollout).
+            env_state, last_obs, _rollout_rng, transitions = collect_rollout(
+                belief_train_states,
+                utterance_train_states,
+                env,
+                env_state,
+                last_obs,
+                rollout_rng,
+                config.num_steps_per_epoch,
+                render_utterance_fn,
+                image_dim,
+                inference_strategy,
+            )
 
-            carry = (belief_train_states, utterance_train_states, env_state, iteration + 1)
+            # 2) Turn the rollout into per-population advantages + value targets. The env is
+            #    staged (utterance/belief alternate; reward only on act steps), so this is a
+            #    per-population masked GAE -- see training.advantages. Bootstrap values
+            #    default to zeros for now (window treated as episode end); a continuing
+            #    rollout would run each critic on the final carried obs instead.
+            advantages = compute_advantages(transitions, config.gamma, config.gae_lambda)
+
+            # 3) PPO update: form the clipped losses for each population (masked to its own
+            #    stages) and take config.ppo.update_epochs gradient steps, vmapped over the
+            #    num_agents axis. Returns the updated (batched) train states + loss metrics.
+            belief_train_states, utterance_train_states, ppo_metrics = ppo_update(
+                update_rng,
+                belief_train_states,
+                utterance_train_states,
+                transitions,
+                advantages,
+                config.ppo,
+            )
+
+            # 4) Metrics for this iteration.
+            metrics = {
+                "utterance_advantage_mean": advantages.utterance_advantages.mean(),
+                "belief_advantage_mean": advantages.belief_advantages.mean(),
+                **ppo_metrics,
+            }
+
+            carry = (belief_train_states, utterance_train_states, env_state, last_obs, iteration + 1)
             return carry, metrics
 
-        initial_carry = (belief_train_states, utterance_train_states, env_state, jnp.asarray(0, dtype=jnp.int32))
-        (belief_train_states, utterance_train_states, env_state, _), metrics = jax.lax.scan(
+        initial_carry = (belief_train_states, utterance_train_states, env_state, init_obs, jnp.asarray(0, dtype=jnp.int32))
+        (belief_train_states, utterance_train_states, env_state, _, _), metrics = jax.lax.scan(
             _update_step,
             initial_carry,
             xs=None,
@@ -271,4 +310,4 @@ def make_train(config: ExperimentConfig):
             **debug_outputs,
         )
 
-    return train#
+    return train  #
