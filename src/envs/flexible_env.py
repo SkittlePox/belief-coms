@@ -32,29 +32,26 @@ class FlexibleEnvParams:
     *with identical shapes* — which is what keeps a vmap-over-environments clean
     (no per-env Python branching / lax.switch).
 
-    Conditioning (the most general the consumers can feed):
-
         transition   T(s' | s, a0, a1)         shape [S, A, A, S]
         observation  O(o0, o1 | s', a0, a1)    shape [S, A, A, O, O]
         reward       R_i(s, a0, a1, s')        shape [N, S, A, A, S]
 
-    ``num_states`` / ``num_actions`` record the *real* (pre-padding) cardinality
-    so consumers can mask the zero-padded tail. ``initial_state_distribution``
-    [S] is the prior over the true world state at reset, and it is also every
-    agent's prior belief. ``terminal_mask`` [S] is 1 on terminal states.
+    ``num_states`` and ``num_actions`` record the *real* (pre-padding) cardinality
+    so consumers can mask the zero-padded tail.
+    
+    ``initial_state_distribution`` [S] is the prior over the true world state at reset, 
+    and it is also every agent's prior belief.
+    
+    ``terminal_mask`` [S] is 1 on terminal states.
 
     There is deliberately no per-role initial belief. Every agent starts from
     ``initial_state_distribution``, and so does every level of a nested belief
     hierarchy: my prior estimate of your belief, and of your estimate of mine, are
-    all the same distribution. (That is the law of total expectation -- averaging a
-    posterior over its own prior predictive returns the prior -- so a per-role field
-    could only ever hold a copy of this one.) Agents diverge the moment reset emits
+    all the same distribution. Agents diverge the moment reset emits
     observations, not before; see tools.belief_representations.initial_belief.
 
-    Information asymmetry belongs in the OBSERVATION function, not the prior: to
-    give one agent privileged knowledge of the state, let it observe the state. An
-    agent whose prior differs from ``initial_state_distribution`` is not better
-    informed, it is simply wrong about the world.
+    Note: It may be useful to put agents into specific (and innacurate) belief
+    states for sake of experimentation.
 
     When stacked across game types (see factory.assemble_environments) every
     field gains a leading game-type axis.

@@ -33,7 +33,7 @@ def simple_assignment_fn(
     game_type_id: int = 0,
     underlying_env_steps_per_episode: int = 10,
 ) -> AssignmentFn:
-    """Build an AssignmentFn that randomly assigns agents to two-agent games of one type.
+    """Build an AssignmentFn that randomly assigns agents to a given two-agent game.
 
     Every game is of type ``game_type_id`` and holds two agents. The agents are
     randomly partitioned across ``num_agents // 2`` games, and within each game they

@@ -109,7 +109,7 @@ class StackedSignificationState:
     agent_utterance_actions_rendered: chex.Array
 
     # World: the true DecPOMDP state of each game.
-    game_states: chex.Array  # [num_games]
+    game_states: chex.Array  # [num_games] (each state is a number)
 
     # Beliefs: both rows are indexed by the SUBJECT agent (same layout). Row i of
     # true_agent_belief_states is agent i's own belief; row i of

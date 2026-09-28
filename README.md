@@ -28,6 +28,15 @@ Hmm okay this is very interesting. If everything is a guessing game it makes the
 
 I think this is the end of stacked_signification_decpomdp.py. I'll need to build visualizations to double-check it works as expected.
 
+# Getting up to speed
+
+### Monday Sep 28th, 2026
+
+I'm going to read the files in this order:
+1. `/communication/communication_scheme.py`
+2. `/communication/game_role_assignment.py`
+3. `/envs/flexible_env.py`
+
 # Installation
 
 The project is packaged so it can be installed as an **editable** package with

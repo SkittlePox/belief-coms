@@ -1,6 +1,9 @@
 """Communication schemes for the StackedSignificationDecPOMDP.
 
-A CommunicationScheme is a fixed sequence of communication rounds. A
+A CommunicationScheme is a fixed sequence of communication rounds had between
+agents in between environment timesteps. The environment is paused until all
+the rounds of communication have occured.
+
 CommunicationSchemeFn maps an in-game iteration to the scheme in force at that
 iteration; the env (see stacked_signification_decpomdp.py) calls it each
 underlying-env step, which is what lets a scheme change over training.
@@ -11,13 +14,18 @@ other agent, so it is not stored).
 
 Design Q&A
 ----------
-Q: Can different games run different communication schemes at the same timestep?
+Q: Can different games run different communication schemes at the same timestep? A 
+   StackedSignificationDecPOMDP can run multiple games in parallel.
 A: No. ``communication_scheme_fn(iteration)`` returns a *single* CommunicationScheme
    that governs every game at that iteration. The scheme may vary *across* iterations
    (write a CommunicationSchemeFn whose output depends on ``iteration``), but within
    an iteration all games communicate identically -- there is no per-game scheme
    axis. Supporting per-game schemes would mean indexing the scheme by game (the way
    ``game_set`` indexes game type in game_role_assignment.py); we intentionally do not.
+Q: Can we have different communication rounds depending on the underlying timestep of 
+   the environment? E.g., so that Agent A and Agent B can take turns speaking with
+   the environment changing state in between?
+A: No. Not as implemented below. Each set of rounds occurs in between each env timestep.
 """
 
 import dataclasses
@@ -33,11 +41,17 @@ SPEAKER_A, SPEAKER_B = 0, 1
 
 @struct.dataclass
 class CommunicationScheme:
-    """A fixed sequence of communication rounds for one in-game iteration.
+    """The pattern of communication between agents that occurs in between environment timesteps.
+
+    Agents get to communicate in between timesteps in the underlying environment.
+    The objects in this class represent exactly what that pattern of communication 
+    looks like. All rounds of communication happen before interaction with the environment
+    is resumed.
+
 
     ``who_speaks[r, i] == 1`` means speaker i utters in round r. ``total_num_rounds``
     is who_speaks's real length (its leading dimension); it is stored explicitly so a
-    scheme's length survives any downstream padding/stacking done by the env.
+    scheme's length survives any downstream padding/stacking.
     """
 
     who_speaks: chex.Array  # [num_rounds, num_speakers]
@@ -50,9 +64,7 @@ class CommunicationScheme:
         return cls(who_speaks, jnp.array(who_speaks.shape[0], dtype=jnp.int32))
 
 
-# The selectable schemes, as data: name -> who_speaks rows. Single source of truth
-# for both the CLI Literal and the by-name registry -- add a scheme here and it is
-# selectable everywhere.
+# The selectable schemes: name -> who_speaks rows.
 _SCHEME_ROWS: dict[str, list[list[int]]] = {
     "a_to_b": [[1, 0]],  # A->B, one round
     "b_to_a": [[0, 1]],  # B->A, one round

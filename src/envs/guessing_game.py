@@ -13,8 +13,9 @@ A: Yes. It's absorbing, gives 0 reward, emits a dedicated "done" observation (th
    referents; you reach state 3 only by pressing the matching button (a0 == s).
 
 Q: Is the observation function deterministic?
-A: In the referent states, no: each agent sees one of the two referent symbols != s,
-   50/50, drawn independently per agent and per step (action-independent). In the
+A: In the referent states, no: the two agents see the two referent symbols != s,
+   one each, with the assignment 50/50 (so their symbols always differ, and together
+   they pin down s). Draws are independent across steps and action-independent. In the
    done state it IS deterministic: both agents see the dedicated done symbol, so a
    belief update on that observation collapses onto the terminal state.
 
@@ -23,6 +24,8 @@ A: Yes. Each observed symbol k rules out state k, so after seeing both non-true
    symbols the belief collapses to the true state. P(identified after n waits) =
    1 - 0.5^(n-1) (~3 waits on average), at a cost of -0.1 per wait. So the presser
    can solo-solve the game; communication only speeds it up, it isn't necessary.
+   (With communication it's solvable in one step: the observer's symbol is always the
+   one the presser didn't see.)
    Note: this is not a k-POMDP and there is no static randomness in this environment.
 """
 
@@ -62,24 +65,28 @@ def build_observation_tensor(num_states, num_actions, num_observations, done_sta
     `num_observations` symbols. The LAST symbol (index num_observations - 1) is a
     dedicated "done" symbol emitted only in the terminal state; the remaining
     `num_observations - 1` symbols are the referent symbols. In a non-terminal
-    (referent) state s each agent independently sees, uniformly, one of the referent
-    symbols that are NOT s (so symbol k rules out state k, and the done symbol is
-    never emitted). In the done state both agents deterministically see the done
-    symbol, which signals to belief updating that a terminal state was entered. The
-    joint is the outer product of the two identical per-agent marginals;
-    action-independent here, so we broadcast over the action axes.
+    (referent) state s the two agents see two DIFFERENT referent symbols, both != s,
+    with the ordered pair (o0, o1) drawn uniformly (so symbol k rules out state k, the
+    done symbol is never emitted, and the two agents' symbols together identify s when
+    there are 3 referents). The observations are therefore correlated: each agent's
+    marginal is uniform over the referent symbols != s, but the joint is not their
+    outer product. In the done state both agents deterministically see the done
+    symbol, which signals to belief updating that a terminal state was entered.
+    Action-independent here, so we broadcast over the action axes.
     """
     O = np.zeros((num_states, num_actions, num_actions, num_observations, num_observations))
     done_symbol = num_observations - 1
     num_referent_symbols = num_observations - 1  # every symbol except the done symbol
     for s in range(num_states):
-        row = np.zeros(num_observations)
+        joint = np.zeros((num_observations, num_observations))
         if s == done_state:
-            row[done_symbol] = 1.0  # deterministic "done" signal
+            joint[done_symbol, done_symbol] = 1.0  # deterministic "done" signal
         else:
             others = [k for k in range(num_referent_symbols) if k != s]
-            row[others] = 1.0 / len(others)  # uniform over referent symbols != s
-        O[s, :, :, :, :] = np.outer(row, row)  # independent identical marginals
+            pairs = [(i, j) for i in others for j in others if i != j]
+            for i, j in pairs:
+                joint[i, j] = 1.0 / len(pairs)  # uniform over distinct ordered pairs != s
+        O[s, :, :, :, :] = joint
     return jnp.asarray(O)
 
 
@@ -150,6 +157,18 @@ if __name__ == "__main__":
     params, _ = guessing_game_spec()
     env = FlexibleEnv(params)
     key = jax.random.key(10)
+
+    ### Joint observation likelihoods O(o0, o1 | s') per state ###
+    O = np.asarray(params.observation)
+    num_obs = O.shape[-1]
+    print(f"observation tensor shape [s', a0, a1, o0, o1]: {O.shape}")
+    print(f"action-independent: {bool(np.allclose(O, O[:, :1, :1]))}")
+    for s in range(O.shape[0]):
+        joint = O[s, 0, 0]  # action-independent, so any (a0, a1) slice is representative
+        print(f"\ns'={s}{' (done)' if params.terminal_mask[s] else ''}   rows = o0 (agent 0), cols = o1 (agent 1)")
+        print("         " + "".join(f"o1={j:<5}" for j in range(num_obs)))
+        for i in range(num_obs):
+            print(f"  o0={i}   " + "".join(f"{joint[i, j]:<8.3g}" for j in range(num_obs)))
 
     ### Basic environment loop with a random policy ###
     for episode in range(3):
