@@ -23,10 +23,10 @@ BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 # Terminology
 # -----------
 # ROUND:  One speaker->listener exchange, spanning TWO step_env calls (UTTERANCE_STAGE
-#         then BELIEF_STAGE).
+#         then BELIEF_STAGE). Each round entails speaking AND listening.
 # BLOCK:  The full CommunicationScheme between two underlying-env steps: a sequence of
 #         rounds. The block's last round's belief stage also steps the DecPOMDP ("act").
-# EPISODE: A sequence of blocks; ends when underlying_env_iteration hits episode_horizon,
+# EPISODE: A complete sequence of blocks; ends when underlying_env_iteration hits episode_horizon,
 #          at which point assignment_fn re-assigns agents to games/roles.
 #
 # Substates of StackedSignificationState
@@ -49,8 +49,7 @@ BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 # (the partner map is its own inverse in a dyad).
 #
 # The estimate matters because each agent marginalizes its partner's unobserved action
-# via the partner's optimal policy applied to this estimate. A bad estimate corrupts the
-# true-belief update.
+# via the partner's optimal policy applied to this estimate.
 #
 # belief_estimate_post_utterance (step_env input) is also subject-indexed: row i is the
 # refreshed estimate ABOUT agent i after i's partner (the speaker) has uttered.
@@ -80,7 +79,7 @@ class GameCountersState:
 
     underlying_env_iteration: chex.Array  # scalar int; resets to 0 at each episode boundary
     cumulative_env_iteration: chex.Array  # scalar int; never resets; the key passed to communication_scheme_fn
-    episode_index: chex.Array  # scalar int; which episode we are in; +1 at each boundary; keys the re-route
+    episode_index: chex.Array  # scalar int; which episode we are in; +1 at each boundary
     episode_horizon: chex.Array  # scalar int; this episode's underlying_env_steps_per_episode (from the route)
 
 
@@ -761,6 +760,7 @@ class StackedSignificationDecPOMDP:
 
         # Each agent's initial belief IS its game's world prior -- every agent, every role.
         # (There is no per-role initial belief; see FlexibleEnvParams.)
+        # NOTE: This is subject to change in the future.
         agent_initial_belief_states = self.all_env_parameters.initial_state_distribution[agent_game_types]
 
         # Sample each game's true initial world state from its initial-state dist.

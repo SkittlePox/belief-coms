@@ -140,8 +140,9 @@ def test_the_reset_observation_beats_the_prior():
     looking = np.asarray(belief_factory.initial_other_belief_estimate(jnp.array(1), agent_id=0).probs)
 
     np.testing.assert_allclose(blind, [1 / 3, 1 / 3, 1 / 3, 0.0], atol=1e-5)
-    # The ego saw symbol 1 and ruled out state 1 for ITSELF. The other agent did not see it,
-    # so the ego infers they are LESS likely than average to have ruled state 1 out -- their
-    # estimated belief in state 1 drops relative to states 0 and 2, but does not vanish.
-    np.testing.assert_allclose(looking, [0.375, 0.25, 0.375, 0.0], atol=1e-4)
+    # The ego saw symbol 1 and ruled out state 1 for ITSELF. The two agents always see
+    # DIFFERENT symbols, so the other agent certainly did not see 1: it saw 2 (state 0) or
+    # 0 (state 2), 50/50, and so believes [.5, .5, 0] or [0, .5, .5]. It can never have
+    # ruled state 1 out -- its estimated belief in state 1 RISES to 0.5.
+    np.testing.assert_allclose(looking, [0.25, 0.5, 0.25, 0.0], atol=1e-4)
     assert not np.allclose(blind, looking, atol=1e-2)

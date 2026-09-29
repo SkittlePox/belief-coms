@@ -33,9 +33,13 @@ I think this is the end of stacked_signification_decpomdp.py. I'll need to build
 ### Monday Sep 28th, 2026
 
 I'm going to read the files in this order:
+
 1. `/communication/communication_scheme.py`
 2. `/communication/game_role_assignment.py`
 3. `/envs/flexible_env.py`
+4. `/envs/guessing_game.py`
+
+These are easy to understand. I'm struggling to wrap my head around `/communication/stacked_signification_decpomdp.py` because it's so long and complex.
 
 # Installation
 

@@ -71,8 +71,14 @@ def test_depth_2_is_where_their_model_of_my_action_stops_being_uniform():
 
     At depth 1 the other agent's model of MY action bottoms out at uniform. At depth 2 it
     is pi_me(bel[2]) -- driven by their estimate of my belief -- so bel[1] must differ.
+
+    The history must not pin down their observations to a set of states that pi_me(bel[2])
+    treats symmetrically, or the depth-2 term cancels on normalization. E.g. obs [1, 2]
+    after pressing 2: I know they saw 2 then 1, leaving states 0 and 2, which bel[2] weighs
+    equally. Here (saw 0, pressed 1, saw 0 again -- on-policy, since bel[0] = [0, .5, .5]
+    before the press) it does not cancel.
     """
-    obs, acts = [1, 2], [2]
+    obs, acts = [0, 0], [1]
     shallow = run_tower(build_nested_belief_step(PARAMS, ego_role=0, depth=1), obs, acts)
     deeper = run_tower(build_nested_belief_step(PARAMS, ego_role=0, depth=2), obs, acts)
 

@@ -8,7 +8,8 @@ Static panels (top) read straight off the ``FlexibleEnvParams`` built by
     state (3); every other button keeps you put.
   * observation ``O[S, A, A, O, O]`` -- action-independent, so we fix a=(0,0). Shown as
     each agent's per-symbol marginal ``O(o | s')`` (state s never emits symbol s) and,
-    for one state, the joint ``O(o0, o1 | s')`` = outer product of identical marginals.
+    for one state, the joint ``O(o0, o1 | s')`` -- correlated, not the outer product of
+    the marginals: the two agents always see the two different symbols != s.
   * reward ``R[N, S, A, A, S]`` -- shared across agents, independent of a1 and s':
     +1 correct button, -1 wrong, -0.1 wait, 0 in the done state.
 
@@ -42,7 +43,7 @@ def _belief_by_waiting(params, true_state=0, n_waits=12, seed=0):
     wait_joint_action = (wait, wait)
     presser_obs_dist = params.observation[true_state, 0, 0].sum(axis=1)  # O(o | true_state)
 
-    belief = distrax.Categorical(probs=params.initial_belief_states[0])
+    belief = distrax.Categorical(probs=params.initial_state_distribution)
     frames = [(np.asarray(belief.probs), None)]  # start: the uniform prior
     key = jax.random.key(seed)
     for _ in range(n_waits):
@@ -72,7 +73,7 @@ def render() -> str:
     reward_grid = R[0, :, :, 0, 0]  # [S, A]
     # Observation marginal per agent: O(o | s') = sum out the other agent.
     obs_marg = Obs[:, 0, 0, :, :].sum(axis=2)  # [S, O]
-    # Joint observation for one referent state (state 0): outer product structure.
+    # Joint observation for one referent state (state 0): agents see distinct symbols.
     joint_state = 0
     obs_joint = Obs[joint_state, 0, 0]  # [O, O]
 
@@ -90,7 +91,7 @@ def render() -> str:
             "transition  T:  next state s'  (a1 inert;  a0==s → done)",
             "reward  R(s, a0):  +1 hit / −1 miss / −0.1 wait / 0 done",
             "observation marginal  O(o | s')   (state s never emits symbol s)",
-            f"joint obs  O(o0, o1 | s'={joint_state})  = outer(marginal, marginal)",
+            f"joint obs  O(o0, o1 | s'={joint_state})   (agents always see different symbols)",
             "FlexibleEnv rollout — presser's belief while waiting  ▶",
         ),
     )
