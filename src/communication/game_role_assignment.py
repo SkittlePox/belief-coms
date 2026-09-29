@@ -10,7 +10,7 @@ from typing import Callable, Union
 class AgentGameRoleAssignment:
     """
     An assignment of agents to games and roles for a full episode.
-    Each AgentGameRoleAssignment represents an assignment of agents to a full episode in a game (with underlying_env_steps_per_episode timesteps).
+    Each AgentGameRoleAssignment represents an assignment of agents to a full episode in a game (with underlying_env_steps_per_episode episode_indexs).
     """
 
     game_set: chex.Array  # [num agents / 2], index i represents game i's game type index
@@ -21,8 +21,8 @@ class AgentGameRoleAssignment:
     )  # scalar int: how many underlying-DecPOMDP steps this episode runs (lockstep across all games; early-terminating games are masked, not re-routed)
 
 
-# AssignmentFn is sampled once per episode; `iteration` is the episode index.
-AssignmentFn = Callable[[chex.PRNGKey, int], AgentGameRoleAssignment]  # (key, iteration) -> assignment
+# AssignmentFn is sampled once per episode; `episode_index` is the episode index.
+AssignmentFn = Callable[[chex.PRNGKey, int], AgentGameRoleAssignment]  # (key, episode_index) -> assignment
 
 # Dyadic games: exactly two agents (two roles) per game.
 AGENTS_PER_GAME = 2
@@ -42,9 +42,9 @@ def simple_assignment_fn(
     With ``num_agents=10`` and ``game_type_id=0`` this assigns 10 agents into 5 games
     of id 0, each with one role-0 and one role-1 agent.
 
-    The returned AssignmentFn takes ``(key, iteration)``, where ``iteration`` is the
+    The returned AssignmentFn takes ``(key, episode_index)``, where ``episode_index`` is the
     episode index. This simple assigner does not let the assignment depend on the
-    iteration; it re-randomizes purely from ``key``.
+    timestep; it re-randomizes purely from ``key``.
 
     Args:
         num_agents: Total number of agents to assign.
@@ -53,10 +53,10 @@ def simple_assignment_fn(
             each episode runs.
 
     Returns:
-        An ``AssignmentFn`` mapping (key, iteration) -> AgentGameRoleAssignment.
+        An ``AssignmentFn`` mapping (key, episode_index) -> AgentGameRoleAssignment.
     """
 
-    def assign(key: chex.PRNGKey, iteration: int) -> AgentGameRoleAssignment:
+    def assign(key: chex.PRNGKey, episode_index: int) -> AgentGameRoleAssignment:
         num_games = num_agents // AGENTS_PER_GAME
 
         # Every game shares the same game type.
@@ -90,13 +90,13 @@ def fixed_pairs_assignment_fn(
     num_agents: int = 10,
     underlying_env_steps_per_episode: int = 10,
 ) -> AssignmentFn:
-    """Build an AssignmentFn with a fixed, iteration-independent assignment.
+    """Build an AssignmentFn with a fixed, timestep-independent assignment.
 
     Agents are partitioned into consecutive pairs: agent i is placed in game
     ``i // 2`` with role ``i % 2`` -- games (0,1), (2,3), ... Unlike
     ``simple_assignment_fn``, the assignment never re-randomizes -- the same agents play
     the same roles in the same games every episode, regardless of ``key`` or
-    ``iteration``. Every game is game type 0, so unlike simple_assignment_fn there is no
+    ``episode_index``. Every game is game type 0, so unlike simple_assignment_fn there is no
     ``game_type_id`` knob.
 
     Args:
@@ -105,12 +105,12 @@ def fixed_pairs_assignment_fn(
             per episode.
 
     Returns:
-        An ``AssignmentFn`` that returns the same AgentGameRoleAssignment for every (key, iteration).
+        An ``AssignmentFn`` that returns the same AgentGameRoleAssignment for every (key, episode_index).
     """
     num_games = num_agents // AGENTS_PER_GAME
 
     # The assignment is fully determined by the args, so build it once and close over
-    # it; `assign` ignores key and iteration entirely.
+    # it; `assign` ignores key and episode_index entirely.
     slots = jnp.arange(num_agents)
     fixed_assignment = AgentGameRoleAssignment(
         game_set=jnp.zeros((num_games,), dtype=jnp.int32),  # all game type 0
@@ -119,7 +119,7 @@ def fixed_pairs_assignment_fn(
         underlying_env_steps_per_episode=jnp.asarray(underlying_env_steps_per_episode, dtype=jnp.int32),
     )
 
-    def assign(key: chex.PRNGKey, iteration: int) -> AgentGameRoleAssignment:
+    def assign(key: chex.PRNGKey, episode_index: int) -> AgentGameRoleAssignment:
         return fixed_assignment
 
     return assign
@@ -176,7 +176,7 @@ if __name__ == "__main__":
     key = jax.random.key(0)
 
     assign_fn = simple_assignment_fn(num_agents=10, game_type_id=0, underlying_env_steps_per_episode=7)
-    assignment = assign_fn(key, iteration=0)
+    assignment = assign_fn(key, episode_index=0)
 
     print("game_set:              ", assignment.game_set)
     print("agent_game_assignment: ", assignment.agent_game_assignment)

@@ -31,7 +31,9 @@ class Transition(NamedTuple):
     Leading axis of every array is ``[num_agents]`` (the scan adds a further leading
     ``[num_steps]`` axis when it stacks these). ``stage`` is the scalar
     ``UTTERANCE_STAGE``/``BELIEF_STAGE`` this step ran in; ``reward`` is the per-agent
-    env reward (zero except on act steps).
+    env reward, real only on act steps and NaN otherwise. The NaN is a placeholder for a
+    value to be filled in retroactively once communication finishes; until that
+    happens, consumers such as ``compute_advantages`` must not use it as a number.
     """
 
     stage: jnp.ndarray  # scalar int: which communicative stage this step was

@@ -79,12 +79,12 @@ def padded_scheme_fn(rows: Sequence[Sequence[int]], pad_to: int) -> Callable:
 
 def schedule(state: StackedSignificationState) -> tuple:
     """The scheduling counters as plain ints, for comparing against hand-written traces:
-    (stage, round, underlying_env_iteration, cumulative_env_iteration, comm_steps, episode_index)."""
+    (stage, round, underlying_env_timestep, cumulative_env_timestep, comm_steps, episode_index)."""
     return (
         int(state.dialog.communicative_round_stage),
         int(state.dialog.communication_round_iterator),
-        int(state.game_counters.underlying_env_iteration),
-        int(state.game_counters.cumulative_env_iteration),
+        int(state.game_counters.underlying_env_timestep),
+        int(state.game_counters.cumulative_env_timestep),
         int(state.dialog.cumulative_communication_round_iterator),
         int(state.game_counters.episode_index),
     )
