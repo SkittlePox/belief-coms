@@ -42,7 +42,7 @@ def test_rollout_runs_and_keeps_beliefs_valid(estimate_mode, act_first):
     h = Harness.build(scheme="a_to_b_thrice", num_agents=4, horizon=2, act_first=act_first, estimate_mode=estimate_mode)
     roll = h.rollout(seed=0, num_steps=6 * 5)  # 6 calls per a_to_b_thrice block, 5 blocks
     assert len(roll.states) == len(roll.obs) == 31
-    assert len(roll.pre_act_states) == len(roll.rewards) == len(roll.actions) == 30
+    assert len(roll.post_comm_true_beliefs) == len(roll.post_comm_estimated_beliefs) == len(roll.rewards) == len(roll.actions) == 30
     for state in roll.states:
         for b in (state.true_agent_belief_states, state.estimated_agent_belief_states):
             b = np.asarray(b)

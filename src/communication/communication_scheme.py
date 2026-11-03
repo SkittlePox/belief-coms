@@ -41,13 +41,12 @@ SPEAKER_A, SPEAKER_B = 0, 1
 
 @struct.dataclass
 class CommunicationScheme:
-    """The pattern of communication between agents that occurs in between environment timesteps.
+    """The pattern of communication between agents that occurs *in between* environment timesteps.
 
     Agents get to communicate in between timesteps in the underlying environment.
     The objects in this class represent exactly what that pattern of communication 
-    looks like. All rounds of communication happen before interaction with the environment
-    is resumed.
-
+    looks like. All rounds of communication (each row is a round) happen before
+    interaction with the environment is resumed.
 
     ``who_speaks[r, i] == 1`` means speaker i utters in round r. ``total_num_rounds``
     is who_speaks's real length (its leading dimension); it is stored explicitly so a

@@ -53,11 +53,13 @@ class Actions(NamedTuple):
 
 class Rollout(NamedTuple):
     """A driven trajectory. ``states[0]`` / ``obs[0]`` are from reset; entry t+1 is after
-    step t. ``pre_act_states``, ``rewards`` and ``actions`` have one entry per step."""
+    step t. ``post_comm_true_beliefs``, ``post_comm_estimated_beliefs``, ``rewards`` and
+    ``actions`` have one entry per step."""
 
     states: list
     obs: list
-    pre_act_states: list
+    post_comm_true_beliefs: list
+    post_comm_estimated_beliefs: list
     rewards: list
     actions: list
 
@@ -103,7 +105,7 @@ class Harness:
 
     def __post_init__(self):
         # Jit once per harness; the env is closed over (not an argument), so the trace is reused.
-        self._step = jax.jit(self.env.step_env_with_substate)
+        self._step = jax.jit(self.env.step_env)
 
     @classmethod
     def build(
@@ -142,7 +144,7 @@ class Harness:
         )
 
     def step(self, key: chex.PRNGKey, state: StackedSignificationState, actions: Actions | None = None):
-        """One step_env call; returns (pre_act_state, state, obs, rewards)."""
+        """One step_env call; returns (state, obs, rewards, post_comm_true_beliefs, post_comm_estimated_beliefs)."""
         actions = self.actions(state) if actions is None else actions
         return self._step(key, state, actions.utterances, actions.estimates, actions.beliefs)
 
@@ -152,13 +154,14 @@ class Harness:
         actions_fn = actions_fn or self.actions
         reset_key, walk_key = jax.random.split(jax.random.key(seed))
         state, obs = self.env.reset(reset_key)
-        roll = Rollout([state], [obs], [], [], [])
+        roll = Rollout([state], [obs], [], [], [], [])
         for step_key in jax.random.split(walk_key, num_steps):
             actions = actions_fn(state)
-            pre_act, state, obs, rewards = self.step(step_key, state, actions)
+            state, obs, rewards, post_comm_true, post_comm_estimated = self.step(step_key, state, actions)
             roll.states.append(state)
             roll.obs.append(obs)
-            roll.pre_act_states.append(pre_act)
+            roll.post_comm_true_beliefs.append(post_comm_true)
+            roll.post_comm_estimated_beliefs.append(post_comm_estimated)
             roll.rewards.append(rewards)
             roll.actions.append(actions)
         return roll

@@ -4,7 +4,7 @@
 A single ``env_step`` advances the stacked env by exactly ONE ``step_env`` call --
 i.e. one communicative *stage* (utterance or belief), not a whole round. Both agent
 populations are run every step regardless of stage; the env internally consumes only
-the stage-relevant action (see ``StackedSignificationDecPOMDP._step_env_impl``) and
+the stage-relevant action (see ``StackedSignificationDecPOMDP.step_env``) and
 zeros the rest. We therefore record BOTH populations' actions/values/log-probs plus the
 ``stage`` at every step, and rely on a later masking pass (returns/PPO) to keep only the
 entries that actually drove the env on each stage.
@@ -138,7 +138,7 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
     belief_estimate_post_utterance = env_state.estimated_agent_belief_states
 
     # --- Step the environment one stage --------------------------------------
-    env_state, next_obs, rewards = env.step_env(
+    env_state, next_obs, rewards, _, _ = env.step_env(
         step_rng,
         env_state,
         utterance_actions,

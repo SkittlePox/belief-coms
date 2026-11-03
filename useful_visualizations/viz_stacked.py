@@ -85,9 +85,9 @@ def _rollout(env):
     about to step) and the post-act state (world stepped). Communication-only steps stay a
     single frame. Each snapshot is tagged with its step index and phase for labeling.
     """
-    # reset returns (state, observations); step_env_with_substate returns
-    # (pre_act_state, state, observations, rewards). We read everything we plot off the
-    # states, so we drop obs and rewards.
+    # reset returns (state, observations); step_env returns (post_comm_true_beliefs,
+    # post_comm_estimated_beliefs, state, observations, rewards). We read everything we
+    # plot off the states (plus the post-comm beliefs), so we drop obs and rewards.
     state, _obs = env.reset(jax.random.key(0))
     num_states = int(state.true_agent_belief_states.shape[-1])
 
@@ -109,12 +109,22 @@ def _rollout(env):
     # acted once inside reset() (an act that is not surfaced as a separate substate).
     snaps = [tagged(state, -1, "reset")]
     for t in range(NUM_STEPS):
-        pre_act, state, _obs, _rewards = env.step_env_with_substate(jax.random.key(t), state, utt, other_est, valid_belief)
-        # An act step advances cumulative_env_iteration; only then is the pre-act substate
+        prev_state = state
+        state, _obs, _rewards, post_comm_true, post_comm_est = env.step_env(jax.random.key(t), state, utt, other_est, valid_belief)
+        # An act step advances cumulative_env_timestep; only then is the pre-act moment
         # (communication resolved, world not yet stepped) a distinct, informative frame, so
-        # we splice it in as sub-frame "a" ahead of the post-act world-step frame "b".
-        is_act = int(state.game_counters.cumulative_env_iteration) > int(pre_act.game_counters.cumulative_env_iteration)
+        # we splice it in as sub-frame "a" ahead of the post-act world-step frame "b". That
+        # frame is the incoming state with the post-communication beliefs swapped in and the
+        # act outputs at their no-act sentinels.
+        is_act = int(state.game_counters.cumulative_env_timestep) > int(prev_state.game_counters.cumulative_env_timestep)
         if is_act:
+            pre_act = prev_state.replace(
+                true_agent_belief_states=post_comm_true,
+                estimated_agent_belief_states=post_comm_est,
+                last_agent_rewards=jnp.full((NUM_AGENTS,), jnp.nan),
+                last_agent_actions=-jnp.ones((NUM_AGENTS,), dtype=jnp.int32),
+                last_agent_observations=-jnp.ones((NUM_AGENTS,), dtype=jnp.int32),
+            )
             snaps.append(tagged(pre_act, t, "pre_act"))
         snaps.append(tagged(state, t, "act" if is_act else "comm"))
     return snaps
