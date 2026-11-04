@@ -199,8 +199,14 @@ class StackedSignificationDecPOMDP:
             CategoricalBeliefState(jax.tree.map(lambda leaf, t=game_type: leaf[t], all_env_parameters)) for game_type in range(self.num_game_types)
         )
 
-    def _agent_belief_updates(self, game_type, role, ego_belief, other_belief_estimate, observation, action):
+    def _agent_belief_updates(self, game_type, role, ego_belief_probs, other_belief_estimate_probs, observation, action):
         """True-belief + other-belief-estimate update for one agent.
+
+        Takes and returns raw [S] probs (the env's storage format); wraps them in
+        Categoricals here for the CategoricalBeliefState methods.
+
+        NOTE: We may want to keep track of and update a second-order belief: what agent A
+        believes agent B believes about agent A's belief state.
 
         Conditioned on the agent's environment (``game_type``, via lax.switch over
         the per-type belief factories) and its ``role`` (passed as the traced
@@ -210,6 +216,8 @@ class StackedSignificationDecPOMDP:
 
         Returns (new_true_belief_probs, new_other_estimate_probs).
         """
+        ego_belief = distrax.Categorical(probs=ego_belief_probs)
+        other_belief_estimate = distrax.Categorical(probs=other_belief_estimate_probs)
         other_policy = lambda belief: self.optimal_policy_bundle(game_type, 1 - role, belief)
 
         def make_branch(belief_factory):
@@ -298,6 +306,7 @@ class StackedSignificationDecPOMDP:
         """Step every game's DecPOMDP once and update beliefs from the observation.
 
         NOTE: We may want policies to be a function of both the speaker's belief and the listener's belief...
+        NOTE: We also may want to keep second-order belief states.
 
         Each agent samples an action from its optimal policy given its true belief; the
         per-game joint actions drive the transition and joint observation; each agent
@@ -368,17 +377,7 @@ class StackedSignificationDecPOMDP:
         agent_observations = game_obs_by_role[agent_game_assignment, agent_role_assignment]  # [num_agents]
 
         # 5. Per-agent belief + estimate-of-partner update from the observation.
-        def per_agent_belief_updates(game_type, role, ego_belief_probs, partner_est_probs, ego_obs, ego_action):
-            return self._agent_belief_updates(
-                game_type,
-                role,
-                distrax.Categorical(probs=ego_belief_probs),
-                distrax.Categorical(probs=partner_est_probs),
-                ego_obs,
-                ego_action,
-            )
-
-        next_true, next_estimate_of_partner = jax.vmap(per_agent_belief_updates)(
+        next_true, next_estimate_of_partner = jax.vmap(self._agent_belief_updates)(
             agent_game_types,
             agent_role_assignment,
             true_agent_belief_states,
