@@ -95,7 +95,8 @@ def schedule(state: StackedSignificationState) -> tuple:
 def partners(env: StackedSignificationDecPOMDP, state: StackedSignificationState) -> np.ndarray:
     """[num_agents] partner index per agent, via the env's own _partner_agent."""
     roles = state.game_roles
-    return np.asarray(env._partner_agent(roles.agent_game_assignment, roles.agent_role_assignment, state.game_states.shape[0]))
+    partner_agent, _ = env._partner_agent(roles.agent_game_assignment, roles.agent_role_assignment, state.game_states.shape[0])
+    return np.asarray(partner_agent)
 
 
 @dataclasses.dataclass
@@ -119,11 +120,11 @@ class Harness:
         estimate_mode: EstimateMode = "oracle",
     ) -> "Harness":
         """A small guessing-game env. ``scheme`` is a scheme name or a CommunicationSchemeFn."""
-        stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
+        stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
         env = StackedSignificationDecPOMDP(
             num_agents=num_agents,
             all_env_parameters=stacked_params,
-            optimal_policies=optimal_policies,
+            optimal_policy_bundle=optimal_policy_bundle,
             assignment_fn=assignment_fn or fixed_pairs_assignment_fn(num_agents=num_agents, underlying_env_steps_per_episode=horizon),
             communication_scheme_fn=get_scheme_fn(scheme) if isinstance(scheme, str) else scheme,
             utterance_action_dim=utterance_action_dim,

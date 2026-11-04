@@ -65,11 +65,11 @@ def _obs_labels(num_obs):
 
 
 def _build_env():
-    stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
+    stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
     env = StackedSignificationDecPOMDP(
         num_agents=NUM_AGENTS,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=NUM_AGENTS, underlying_env_steps_per_episode=4),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,

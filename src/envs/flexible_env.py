@@ -22,6 +22,14 @@ from typing import Callable
 # FlexibleEnvParams (which holds only traceable array data).
 OptimalPolicy = Callable[[distrax.Categorical], distrax.Categorical]
 
+# Games are dyadic: every game type has exactly this many roles.
+NUM_ROLES = 2
+
+# A bundle of optimal policies, one per (game_type, role):
+#   optimal_policy_bundle(game_type, role, belief) -> Categorical over actions.
+# game_type and role may be traced. Built by envs.env_assembly.assemble_environments.
+OptimalPolicyBundle = Callable[[chex.Array, chex.Array, distrax.Categorical], distrax.Categorical]
+
 
 @struct.dataclass
 class FlexibleEnvParams:

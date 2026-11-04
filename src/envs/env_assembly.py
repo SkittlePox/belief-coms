@@ -8,8 +8,10 @@ two things ``StackedSignificationDecPOMDP`` consumes:
 
   * one ``FlexibleEnvParams`` whose array fields are padded to common
     ``(S, A, O)`` maxima and stacked along a leading game-type axis, and
-  * a nested ``[game_type][role]`` table of optimal policies, kept as plain
-    Python callables (not traceable array data).
+  * an optimal policy bundle: a single function
+    ``optimal_policy_bundle(game_type, role, belief) -> Categorical`` that
+    dispatches to the right per-role policy via ``lax.switch``, so
+    ``game_type`` and ``role`` may be traced.
 
 ``FlexibleEnvParams`` / ``OptimalPolicy`` and the generic runtime live in
 ``envs.flexible_env`` (the leaf of the dependency graph); this module imports
@@ -24,10 +26,11 @@ uniform output shape.
 """
 
 import jax
+import distrax
 import jax.numpy as jnp
 from typing import Callable, Sequence, Tuple
 
-from envs.flexible_env import FlexibleEnvParams, OptimalPolicy
+from envs.flexible_env import NUM_ROLES, FlexibleEnvParams, OptimalPolicy, OptimalPolicyBundle
 from envs.guessing_game import guessing_game_spec
 
 
@@ -83,20 +86,26 @@ def _pad_params(p: FlexibleEnvParams, target_states, target_actions, target_obs)
     )
 
 
-def assemble_environments(specs: Sequence[EnvSpec]):
-    """Build the stacked params and policy table from a list of EnvSpecs.
+def assemble_environments(specs: Sequence[EnvSpec]) -> Tuple[FlexibleEnvParams, OptimalPolicyBundle]:
+    """Build the stacked params and optimal policy bundle from a list of EnvSpecs.
 
     Args:
         specs: One EnvSpec per game type. Spec ``i`` becomes game type ``i``.
 
     Returns:
-        (stacked_params, optimal_policies) where stacked_params is a
+        (stacked_params, optimal_policy_bundle) where stacked_params is a
         FlexibleEnvParams with a leading game-type axis on every field, and
-        optimal_policies is the nested [game_type][role] tuple of callables.
+        optimal_policy_bundle(game_type, role, belief) applies that game type's
+        optimal policy for that role (indices may be traced).
     """
     built = [spec() for spec in specs]
     params_list = [params for params, _ in built]
-    policy_lists = [tuple(policies) for _, policies in built]
+    # Flatten row-major [game_type][role] for lax.switch dispatch.
+    flat_policies = []
+    for _, policies in built:
+        assert len(policies) == NUM_ROLES, f"each EnvSpec must provide {NUM_ROLES} role policies, got {len(policies)}"
+        flat_policies.extend(policies)
+    flat_policies = tuple(flat_policies)
 
     target_states = max(p.transition.shape[0] for p in params_list)
     target_actions = max(p.transition.shape[1] for p in params_list)
@@ -107,18 +116,20 @@ def assemble_environments(specs: Sequence[EnvSpec]):
     # Stack matching leaves across game types -> leading game-type axis.
     stacked_params = jax.tree.map(lambda *leaves: jnp.stack(leaves), *padded)
 
-    optimal_policies = tuple(policy_lists)  # [game_type][role]
-    return stacked_params, optimal_policies
+    def optimal_policy_bundle(game_type, role, belief: distrax.Categorical) -> distrax.Categorical:
+        return jax.lax.switch(game_type * NUM_ROLES + role, flat_policies, belief)
+
+    return stacked_params, optimal_policy_bundle
 
 
 if __name__ == "__main__":
     # Assemble a single-game-type environment and show the stacked shapes.
-    stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
+    stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
 
     print("stacked transition:           ", stacked_params.transition.shape)
     print("stacked observation:          ", stacked_params.observation.shape)
     print("stacked reward:               ", stacked_params.reward.shape)
     print("stacked initial_state_dist:   ", stacked_params.initial_state_distribution.shape)
     print("stacked terminal_mask:        ", stacked_params.terminal_mask.shape)
-    print("num game types:               ", len(optimal_policies))
-    print("num roles:                    ", len(optimal_policies[0]))
+    belief = distrax.Categorical(probs=stacked_params.initial_state_distribution[0])
+    print("role 0 policy on prior:       ", optimal_policy_bundle(0, 0, belief).probs)

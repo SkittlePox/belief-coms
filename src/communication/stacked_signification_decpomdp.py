@@ -8,9 +8,9 @@ from functools import partial
 from communication.game_role_assignment import AssignmentFn
 from communication.communication_scheme import CommunicationSchemeFn
 
-# FlexibleEnvParams / OptimalPolicy are defined in envs.flexible_env (the leaf of
+# FlexibleEnvParams / OptimalPolicyBundle / NUM_ROLES are defined in envs.flexible_env (the leaf of
 # the env-definition dependency graph) and consumed here.
-from envs.flexible_env import FlexibleEnvParams, OptimalPolicy
+from envs.flexible_env import NUM_ROLES, FlexibleEnvParams, OptimalPolicyBundle
 from tools.belief_representations import CategoricalBeliefState
 
 
@@ -141,7 +141,7 @@ class StackedSignificationDecPOMDP:
         self,
         num_agents: int,
         all_env_parameters: FlexibleEnvParams,
-        optimal_policies: Sequence[Sequence[OptimalPolicy]],
+        optimal_policy_bundle: OptimalPolicyBundle,
         assignment_fn: AssignmentFn,
         communication_scheme_fn: CommunicationSchemeFn,
         utterance_action_dim: int,
@@ -151,10 +151,9 @@ class StackedSignificationDecPOMDP:
         Args:
             num_agents
             all_env_parameters: Stacked FlexibleEnvParams, indexed by game type along the leading axis.
-            optimal_policies: Nested table of optimal policies indexed [game_type][role].
-                Each entry is an arbitrary callable Categorical(belief) -> Categorical(action).
-                Stored separately from all_env_parameters because callables are not
-                traceable pytree data and cannot be gathered by a traced index.
+            optimal_policy_bundle: optimal_policy_bundle(game_type, role, belief) -> Categorical
+                over actions; game_type and role may be traced (see
+                envs.env_assembly.assemble_environments).
             assignment_fn
             communication_scheme_fn: Maps the cumulative in-game timestep to the
                 CommunicationScheme in force at that timestep (see communication_scheme.py).
@@ -171,14 +170,8 @@ class StackedSignificationDecPOMDP:
         # read and emit, shared by all game types (padding makes it uniform).
         self.belief_dim = all_env_parameters.initial_state_distribution.shape[-1]
 
-        # Policy table indexed [game_type][role]. Flatten once for lax.switch
-        # dispatch: the table is static (Python-level), so the flat list of
-        # callables is available at trace time even though the (game_type, role)
-        # selection index is traced.
-        self.optimal_policies = optimal_policies
-        self.num_game_types = len(optimal_policies)
-        self.num_roles = len(optimal_policies[0])
-        self._flat_policies = tuple(optimal_policies[game_type][role] for game_type in range(self.num_game_types) for role in range(self.num_roles))
+        self.optimal_policy_bundle = optimal_policy_bundle
+        self.num_game_types = all_env_parameters.transition.shape[0]
 
         # One belief-update engine per game type, built from that type's (unstacked)
         # params. Cardinalities are uniform across types (padded), so each is valid.
@@ -186,35 +179,6 @@ class StackedSignificationDecPOMDP:
         self._belief_factories = tuple(
             CategoricalBeliefState(jax.tree.map(lambda leaf, t=game_type: leaf[t], all_env_parameters)) for game_type in range(self.num_game_types)
         )
-
-    def _agent_policy(self, game_type, role, belief_distribution: distrax.Categorical) -> distrax.Categorical:
-        """Select and apply the optimal policy for a single (game_type, role).
-
-        `game_type` and `role` may be traced; dispatch goes through lax.switch over
-        the flattened [game_type * num_roles + role] index. All policies must accept
-        the same belief shape and return the same action-distribution shape (pad /
-        mask actions across game types if they differ).
-        """
-        flat_index = game_type * self.num_roles + role
-        return jax.lax.switch(flat_index, self._flat_policies, belief_distribution)
-
-    def agent_action_distributions(self, agent_game_types, agent_roles, agent_belief_probs):
-        """Vectorized optimal action distribution for every agent.
-
-        Args:
-            agent_game_types: [num_agents] game-type index for each agent.
-            agent_roles:      [num_agents] role index for each agent.
-            agent_belief_probs: [num_agents, num_states] each agent's belief as raw probs.
-
-        Returns:
-            [num_agents, num_actions] each agent's action-distribution probs.
-        """
-
-        def one_agent(game_type, role, belief_probs):
-            belief = distrax.Categorical(probs=belief_probs)
-            return self._agent_policy(game_type, role, belief).probs
-
-        return jax.vmap(one_agent)(agent_game_types, agent_roles, agent_belief_probs)
 
     def _agent_belief_updates(self, game_type, role, ego_belief, other_belief_estimate, observation, action):
         """True-belief + other-belief-estimate update for one agent.
@@ -227,7 +191,7 @@ class StackedSignificationDecPOMDP:
 
         Returns (new_true_belief_probs, new_other_estimate_probs).
         """
-        other_policy = lambda belief: self._agent_policy(game_type, 1 - role, belief)
+        other_policy = lambda belief: self.optimal_policy_bundle(game_type, 1 - role, belief)
 
         def make_branch(belief_factory):
             def branch(ego_belief, other_belief_estimate, observation, action):
@@ -261,18 +225,21 @@ class StackedSignificationDecPOMDP:
         return jax.lax.switch(game_type, branches, ego_belief, other_belief_estimate, observation, action)
 
     def _partner_agent(self, agent_game_assignment, agent_role_assignment, num_games):
-        """Each agent's dyadic partner (the agent in the other role of its game).
+        """Each agent's dyadic partner, plus the (game, role) -> agent map it is read from.
 
-        Builds the (game, role) -> agent map and reads off the OTHER role, giving a
-        [num_agents] array where partner[i] is the agent i is paired with. The map is
-        its own inverse in a dyad. Same gather used in ``_step_underlying_env``.
+        Returns (partner_agent, game_role_to_agent):
+          partner_agent:      [num_agents] partner_agent[i] is the agent i is paired with
+                              (the agent in the OTHER role of i's game). The map is its
+                              own inverse in a dyad.
+          game_role_to_agent: [num_games, NUM_ROLES] the agent occupying each (game, role).
 
         Read and verified on 9/29/26
         """
         game_role_to_agent = (
-            jnp.zeros((num_games, self.num_roles), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(self.num_agents))
+            jnp.zeros((num_games, NUM_ROLES), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(self.num_agents))
         )
-        return game_role_to_agent[agent_game_assignment, 1 - agent_role_assignment]
+        partner_agent = game_role_to_agent[agent_game_assignment, 1 - agent_role_assignment]
+        return partner_agent, game_role_to_agent
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: StackedSignificationState):
@@ -303,7 +270,7 @@ class StackedSignificationDecPOMDP:
 
         """
         num_games = state.game_states.shape[0]
-        partner_agent = self._partner_agent(state.game_roles.agent_game_assignment, state.game_roles.agent_role_assignment, num_games)
+        partner_agent, _ = self._partner_agent(state.game_roles.agent_game_assignment, state.game_roles.agent_role_assignment, num_games)
 
         on_utterance_stage = state.dialog.communicative_round_stage == UTTERANCE_STAGE
         # beliefs[i] = agent i's own belief (subject-indexed as stored).
@@ -353,21 +320,19 @@ class StackedSignificationDecPOMDP:
         num_games = game_states.shape[0]
         agent_game_types = game_types_per_game[agent_game_assignment]  # [num_agents]
 
-        # Map (game, role) -> agent index so we can assemble per-game joint actions.
-        game_role_to_agent = (
-            jnp.zeros((num_games, self.num_roles), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(self.num_agents))
-        )
-
-        partner_agent = game_role_to_agent[agent_game_assignment, 1 - agent_role_assignment]  # [num_agents]
+        # game_role_to_agent [num_games, NUM_ROLES] is used to assemble per-game joint actions.
+        partner_agent, game_role_to_agent = self._partner_agent(agent_game_assignment, agent_role_assignment, num_games)
         # Agent i's estimate of its partner is the estimate ABOUT the partner (partner's row).
         estimate_of_partner = estimated_agent_belief_states[partner_agent]  # [num_agents, S]
 
         action_key, transition_key, obs_key = jax.random.split(key, 3)
 
         # 1. Each agent samples an action from its optimal policy given its true belief.
-        agent_action_distributions = self.agent_action_distributions(agent_game_types, agent_role_assignment, true_agent_belief_states)
-        agent_actions = jax.vmap(lambda probs, k: distrax.Categorical(probs=probs).sample(seed=k))(
-            agent_action_distributions, jax.random.split(action_key, self.num_agents)
+        #    vmap because the bundle dispatches on a scalar (game_type, role).
+        agent_actions = jax.vmap(
+            lambda game_type, role, belief_probs, k: self.optimal_policy_bundle(game_type, role, distrax.Categorical(probs=belief_probs)).sample(seed=k)
+        )(
+            agent_game_types, agent_role_assignment, true_agent_belief_states, jax.random.split(action_key, self.num_agents)
         )  # [num_agents]
 
         # 2. Assemble per-game joint actions in canonical (role 0, role 1) order.
@@ -384,7 +349,7 @@ class StackedSignificationDecPOMDP:
         # reward tensor [num_game_types, num_roles, S, A, A, S], then scatter to agents.
         game_rewards = self.all_env_parameters.reward[
             game_types_per_game[:, None],  # [num_games, 1]
-            jnp.arange(self.num_roles)[None, :],  # [1, num_roles]
+            jnp.arange(NUM_ROLES)[None, :],  # [1, num_roles]
             game_states[:, None],  # [num_games, 1]
             joint_a0[:, None],  # [num_games, 1]
             joint_a1[:, None],  # [num_games, 1]
@@ -568,9 +533,9 @@ class StackedSignificationDecPOMDP:
                 state.game_states,
                 post_comm_true_beliefs,
                 post_comm_estimated_beliefs,
-                jnp.full((self.num_agents,), jnp.nan, dtype=jnp.float32),
-                -jnp.ones((self.num_agents,), dtype=jnp.int32),
-                -jnp.ones((self.num_agents,), dtype=jnp.int32),
+                jnp.full((self.num_agents,), jnp.nan, dtype=jnp.float32),   # Rewards (nan)
+                -jnp.ones((self.num_agents,), dtype=jnp.int32),             # Actions (-1)
+                -jnp.ones((self.num_agents,), dtype=jnp.int32),             # Observations (-1)
             )
 
         (
@@ -660,11 +625,6 @@ class StackedSignificationDecPOMDP:
             last_agent_observations=next_agent_observations,
         )
         
-        # Observation reflects the NEW stage (the action the agent will take next); its
-        # beliefs/estimated-beliefs or utterances are NaN'd per that stage. The per-agent
-        # environment reward for this step is returned alongside (also readable off
-        # state.last_agent_rewards): it is the act's reward on an act step and NaN on a
-        # communication-only step.
         obs = self.get_obs(obs_key, state)
         return (
             state,
@@ -861,12 +821,12 @@ class EnvironmentConfig:
 
         game_names = self.only_games or tuple(GAME_SPECS.keys())
         specs = [GAME_SPECS[name] for name in game_names]
-        stacked_params, optimal_policies = assemble_environments(specs)
+        stacked_env_parameters, optimal_policy_bundle = assemble_environments(specs)
 
         return StackedSignificationDecPOMDP(
             num_agents=num_agents,
-            all_env_parameters=stacked_params,
-            optimal_policies=optimal_policies,
+            all_env_parameters=stacked_env_parameters,
+            optimal_policy_bundle=optimal_policy_bundle,
             assignment_fn=assignment_fn,
             communication_scheme_fn=communication_scheme_fn,
             utterance_action_dim=self.utterance_action_dim,
@@ -888,12 +848,12 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     from communication.communication_scheme import a_to_b_thrice_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
-    stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
+    stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
 
     env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=a_to_b_thrice_scheme_fn,
         utterance_action_dim=3,
@@ -939,12 +899,12 @@ if __name__ == "__main__":
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
     # Build the stacked params + policy table from one game type (the guessing game).
-    stacked_params, optimal_policies = assemble_environments([guessing_game_spec])
+    stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
 
     env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -978,7 +938,7 @@ if __name__ == "__main__":
     act_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -992,20 +952,17 @@ if __name__ == "__main__":
     print("estimate about agent 0:", act_state.estimated_agent_belief_states[0])
     assert act_state.game_counters.underlying_env_timestep == 1, "act-first advances the env once at reset"
 
-    # Direct dispatch check: each agent's belief is routed through its
-    # (game_type, role) policy. Both guessing-game roles are identity here, so we
-    # confirm each agent gets its OWN belief back through the correct branch.
+    # Direct dispatch check: a belief is routed through the (game_type, role)
+    # policy. Both guessing-game roles are identity here, so each call should
+    # return its own belief back through the correct branch.
     belief_role_0 = jnp.array([0.6, 0.3, 0.1, 0.0])
     belief_role_1 = jnp.array([0.2, 0.2, 0.6, 0.0])
-    dists = env.agent_action_distributions(
-        agent_game_types=jnp.array([0, 0]),
-        agent_roles=jnp.array([0, 1]),
-        agent_belief_probs=jnp.stack([belief_role_0, belief_role_1]),
-    )
-    print("role 0 action probs:", dists[0])
-    print("role 1 action probs:", dists[1])
-    assert jnp.allclose(dists[0], belief_role_0)
-    assert jnp.allclose(dists[1], belief_role_1)
+    role_0_probs = env.optimal_policy_bundle(0, 0, distrax.Categorical(probs=belief_role_0)).probs
+    role_1_probs = env.optimal_policy_bundle(0, 1, distrax.Categorical(probs=belief_role_1)).probs
+    print("role 0 action probs:", role_0_probs)
+    print("role 1 action probs:", role_1_probs)
+    assert jnp.allclose(role_0_probs, belief_role_0)
+    assert jnp.allclose(role_1_probs, belief_role_1)
     print("ok: env built via factory; policies dispatch by (game_type, role)")
 
     # step_env section 1: schedule decisions. Use a 3-round block (a_to_b_thrice) so
@@ -1016,7 +973,7 @@ if __name__ == "__main__":
     sched_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=a_to_b_thrice_scheme_fn,
         utterance_action_dim=3,
@@ -1066,7 +1023,7 @@ if __name__ == "__main__":
     # get_obs indexing: on the utterance stage, estimated_beliefs is the estimate of the
     # RECEIVER (partner) the sender is engaged with -- the partner's subject-indexed row.
     us_beliefs, us_estimated, us_utterances = sched_env.get_obs(jax.random.key(0), s0)
-    partner = sched_env._partner_agent(s0.game_roles.agent_game_assignment, s0.game_roles.agent_role_assignment, s0.game_states.shape[0])
+    partner, _ = sched_env._partner_agent(s0.game_roles.agent_game_assignment, s0.game_roles.agent_role_assignment, s0.game_states.shape[0])
     assert jnp.all(us_beliefs == s0.true_agent_belief_states), "beliefs[i] is agent i's own belief"
     assert jnp.all(
         us_estimated == s0.estimated_agent_belief_states[partner]
@@ -1137,7 +1094,7 @@ if __name__ == "__main__":
     boundary_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, underlying_env_steps_per_episode=2),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -1170,7 +1127,7 @@ if __name__ == "__main__":
     act_first_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policies=optimal_policies,
+        optimal_policy_bundle=optimal_policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, underlying_env_steps_per_episode=2),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
