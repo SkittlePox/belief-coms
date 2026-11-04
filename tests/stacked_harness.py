@@ -93,10 +93,8 @@ def schedule(state: StackedSignificationState) -> tuple:
 
 
 def partners(env: StackedSignificationDecPOMDP, state: StackedSignificationState) -> np.ndarray:
-    """[num_agents] partner index per agent, via the env's own _partner_agent."""
-    roles = state.game_roles
-    partner_agent, _ = env._partner_agent(roles.agent_game_assignment, roles.agent_role_assignment, state.game_states.shape[0])
-    return np.asarray(partner_agent)
+    """[num_agents] partner index per agent, as stored on the env's GameRoleState."""
+    return np.asarray(state.game_roles.partner_agent)
 
 
 @dataclasses.dataclass

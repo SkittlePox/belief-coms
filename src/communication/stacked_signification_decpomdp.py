@@ -22,8 +22,8 @@ BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 
 # Terminology
 # -----------
-# ROUND:  One speaker->listener exchange, spanning TWO step_env calls (UTTERANCE_STAGE
-#         then BELIEF_STAGE). Each round entails speaking AND listening.
+# ROUND:  One speaker->listener utterance exchange, spanning TWO step_env calls
+#         (UTTERANCE_STAGE then BELIEF_STAGE). Each round entails speaking AND listening.
 # BLOCK:  The full CommunicationScheme between two underlying-env steps: a sequence of
 #         rounds. The block's last round's belief stage also steps the DecPOMDP ("act").
 # EPISODE: A complete sequence of blocks; ends when underlying_env_timestep hits episode_horizon,
@@ -72,6 +72,25 @@ class GameRoleState:
     agent_game_assignment: chex.Array  # [num_agents] -> game index
     agent_role_assignment: chex.Array  # [num_agents] -> role index
     game_types: chex.Array  # [num_games]  -> game-type index
+
+    # Derived from the assignment above; build via from_assignment so they stay consistent.
+    game_role_to_agent: chex.Array  # [num_games, NUM_ROLES] -> agent occupying that (game, role)
+    partner_agent: chex.Array  # [num_agents] -> agent i's dyadic partner (its own inverse)
+
+    @classmethod
+    def from_assignment(cls, agent_game_assignment, agent_role_assignment, game_types):
+        """Build the state from an assignment, deriving game_role_to_agent and partner_agent."""
+        num_agents = agent_game_assignment.shape[0]
+        num_games = game_types.shape[0]
+        game_role_to_agent = jnp.zeros((num_games, NUM_ROLES), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(num_agents))
+        partner_agent = game_role_to_agent[agent_game_assignment, 1 - agent_role_assignment]
+        return cls(
+            agent_game_assignment=agent_game_assignment,
+            agent_role_assignment=agent_role_assignment,
+            game_types=game_types,
+            game_role_to_agent=game_role_to_agent,
+            partner_agent=partner_agent,
+        )
 
 
 @struct.dataclass
@@ -224,23 +243,6 @@ class StackedSignificationDecPOMDP:
         branches = [make_branch(factory) for factory in self._belief_factories]
         return jax.lax.switch(game_type, branches, ego_belief, other_belief_estimate, observation, action)
 
-    def _partner_agent(self, agent_game_assignment, agent_role_assignment, num_games):
-        """Each agent's dyadic partner, plus the (game, role) -> agent map it is read from.
-
-        Returns (partner_agent, game_role_to_agent):
-          partner_agent:      [num_agents] partner_agent[i] is the agent i is paired with
-                              (the agent in the OTHER role of i's game). The map is its
-                              own inverse in a dyad.
-          game_role_to_agent: [num_games, NUM_ROLES] the agent occupying each (game, role).
-
-        Read and verified on 9/29/26
-        """
-        game_role_to_agent = (
-            jnp.zeros((num_games, NUM_ROLES), dtype=jnp.int32).at[agent_game_assignment, agent_role_assignment].set(jnp.arange(self.num_agents))
-        )
-        partner_agent = game_role_to_agent[agent_game_assignment, 1 - agent_role_assignment]
-        return partner_agent, game_role_to_agent
-
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: StackedSignificationState):
         """Per-agent observation: (beliefs, estimated_beliefs, utterances).
@@ -269,8 +271,7 @@ class StackedSignificationDecPOMDP:
             belief inputs are meaningless -> beliefs and estimated_beliefs are NaN.
 
         """
-        num_games = state.game_states.shape[0]
-        partner_agent, _ = self._partner_agent(state.game_roles.agent_game_assignment, state.game_roles.agent_role_assignment, num_games)
+        partner_agent = state.game_roles.partner_agent
 
         on_utterance_stage = state.dialog.communicative_round_stage == UTTERANCE_STAGE
         # beliefs[i] = agent i's own belief (subject-indexed as stored).
@@ -290,9 +291,7 @@ class StackedSignificationDecPOMDP:
         self,
         key,
         game_states,
-        game_types_per_game,
-        agent_game_assignment,
-        agent_role_assignment,
+        game_roles: GameRoleState,
         true_agent_belief_states,
         estimated_agent_belief_states,
     ):
@@ -318,10 +317,12 @@ class StackedSignificationDecPOMDP:
         from the step and updated its belief from (both kept for debugging/verification).
         """
         num_games = game_states.shape[0]
+        game_types_per_game = game_roles.game_types  # [num_games]
+        agent_game_assignment = game_roles.agent_game_assignment  # [num_agents]
+        agent_role_assignment = game_roles.agent_role_assignment  # [num_agents]
+        game_role_to_agent = game_roles.game_role_to_agent  # [num_games, NUM_ROLES]
+        partner_agent = game_roles.partner_agent  # [num_agents]
         agent_game_types = game_types_per_game[agent_game_assignment]  # [num_agents]
-
-        # game_role_to_agent [num_games, NUM_ROLES] is used to assemble per-game joint actions.
-        partner_agent, game_role_to_agent = self._partner_agent(agent_game_assignment, agent_role_assignment, num_games)
         # Agent i's estimate of its partner is the estimate ABOUT the partner (partner's row).
         estimate_of_partner = estimated_agent_belief_states[partner_agent]  # [num_agents, S]
 
@@ -519,9 +520,7 @@ class StackedSignificationDecPOMDP:
             return self._step_underlying_env(
                 act_key,
                 state.game_states,
-                state.game_roles.game_types,
-                state.game_roles.agent_game_assignment,
-                state.game_roles.agent_role_assignment,
+                state.game_roles,
                 post_comm_true_beliefs,
                 post_comm_estimated_beliefs,
             )
@@ -561,11 +560,7 @@ class StackedSignificationDecPOMDP:
             new_episode_index = state.game_counters.episode_index + 1
             init = self._begin_episode(boundary_key, new_episode_index)
             return (
-                GameRoleState(
-                    agent_game_assignment=init["agent_game_assignment"],
-                    agent_role_assignment=init["agent_role_assignment"],
-                    game_types=init["game_types"],
-                ),
+                init["game_roles"],
                 GameCountersState(
                     underlying_env_timestep=init["underlying_env_timestep"],
                     cumulative_env_timestep=incremented_cumulative_env_timestep + init["underlying_env_timestep"],
@@ -637,26 +632,16 @@ class StackedSignificationDecPOMDP:
     def _begin_episode(self, key, episode_index):
         """Route a fresh episode and produce its initial fields.
 
-        Assigns agents to games/roles via assignment_fn (keyed by episode_index), samples
-        each game's initial world state, and sets each agent's initial belief (and the
+        Assigns agents to games/roles via assignment_fn, samples each game's 
+        initial world state, and sets each agent's initial belief (and the
         initial estimate about it, which equals its own prior) from the env params.
-
-        Then, if ``act_on_reset_before_communicating`` is set, takes one joint DecPOMDP
-        step before any communication (beliefs update from the resulting observation) so
-        the episode starts at in-game timestep 1; otherwise it stays communicate-first at
-        timestep 0. Returns a dict of the episode-initial fields -- including the initial
-        ``underlying_env_timestep`` and the act's ``last_agent_rewards`` /
-        ``last_agent_actions`` / ``last_agent_observations`` (NaN / -1 / -1 when
-        communicate-first) -- plus a fresh leftover
-        ``key``. Shared by reset (episode 0) and the step_env episode boundary (later
-        episodes), so the act-first behavior applies to every episode.
         """
         routing_key, state_key, key = jax.random.split(key, 3)
         route = self.assignment_fn(key=routing_key, episode_index=episode_index)
 
-        agent_role_assignment = route.agent_role_assignment  # [num_agents]
-        game_types_per_game = route.game_set  # [num_games]
-        agent_game_types = game_types_per_game[route.agent_game_assignment]  # [num_agents]
+        game_roles = GameRoleState.from_assignment(route.agent_game_assignment, route.agent_role_assignment, route.game_set)
+        game_types_per_game = game_roles.game_types  # [num_games]
+        agent_game_types = game_types_per_game[game_roles.agent_game_assignment]  # [num_agents]
 
         # Each agent's initial belief IS its game's world prior -- every agent, every role.
         # (There is no per-role initial belief; see FlexibleEnvParams.)
@@ -692,9 +677,7 @@ class StackedSignificationDecPOMDP:
             ) = self._step_underlying_env(
                 step_key,
                 game_states,
-                game_types_per_game,
-                route.agent_game_assignment,
-                agent_role_assignment,
+                game_roles,
                 true_agent_belief_states,
                 estimated_agent_belief_states,
             )
@@ -704,9 +687,7 @@ class StackedSignificationDecPOMDP:
         underlying_env_timestep = jnp.asarray(1 if self.act_on_reset_before_communicating else 0, dtype=jnp.int32)
 
         return dict(
-            agent_game_assignment=route.agent_game_assignment,
-            agent_role_assignment=agent_role_assignment,
-            game_types=game_types_per_game,
+            game_roles=game_roles,
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             estimated_agent_belief_states=estimated_agent_belief_states,
@@ -754,11 +735,7 @@ class StackedSignificationDecPOMDP:
                 # Reset starts on the utterance stage (the speaker emits first).
                 communicative_round_stage=jnp.asarray(UTTERANCE_STAGE, dtype=jnp.int32),
             ),
-            game_roles=GameRoleState(
-                agent_game_assignment=init["agent_game_assignment"],
-                agent_role_assignment=init["agent_role_assignment"],
-                game_types=init["game_types"],
-            ),
+            game_roles=init["game_roles"],
             game_counters=GameCountersState(
                 underlying_env_timestep=underlying_timestep,
                 cumulative_env_timestep=underlying_timestep,
@@ -1023,7 +1000,7 @@ if __name__ == "__main__":
     # get_obs indexing: on the utterance stage, estimated_beliefs is the estimate of the
     # RECEIVER (partner) the sender is engaged with -- the partner's subject-indexed row.
     us_beliefs, us_estimated, us_utterances = sched_env.get_obs(jax.random.key(0), s0)
-    partner, _ = sched_env._partner_agent(s0.game_roles.agent_game_assignment, s0.game_roles.agent_role_assignment, s0.game_states.shape[0])
+    partner = s0.game_roles.partner_agent
     assert jnp.all(us_beliefs == s0.true_agent_belief_states), "beliefs[i] is agent i's own belief"
     assert jnp.all(
         us_estimated == s0.estimated_agent_belief_states[partner]
