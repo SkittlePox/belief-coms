@@ -74,6 +74,10 @@ class BeliefActor(nn.Module):
         log_posterior = log_prior + log_likelihood
 
         # Use log_posterior as Dirichlet concentrations (shift to positive)
+        # NOTE: States with b(s) = 0 get concentration exactly 1e-4 regardless of params. A Dirichlet
+        # with alpha < 1 has unbounded density as x_s -> 0, and those coordinates sample as exactly
+        # 0.0 in float32, so log_prob of a sample is +inf (breaks the PPO ratio). Likely fix: a
+        # Dirichlet restricted to the support of b (zero-support coords fixed at 0, excluded from log_prob).
         concentration = nn.softplus(log_posterior) + 1e-4
         return distrax.Dirichlet(concentration=concentration)
 

@@ -47,8 +47,7 @@ def execute_utterance_agents(rng, apply_fn, params, own_beliefs, partner_estimat
         log_probs: ``[num_agents]``
         values:    ``[num_agents]``
 
-    TODO(Ben): real execution -- any action post-processing (clip/transform), and
-    whether utterance agents get a ToM search variant like the reference speaker.
+    NOTE: This function may eventually need to take additional inputs (e.g. second-order beliefs)
     """
     num_agents = own_beliefs.shape[0]
     agent_rngs = jax.random.split(rng, num_agents)
@@ -80,8 +79,7 @@ def execute_belief_agents(rng, apply_fn, params, previous_beliefs, utterance_ima
         log_probs: ``[num_agents]``
         values:    ``[num_agents]``
 
-    TODO(Ben): real execution -- e.g. deterministic (mode) vs. sampled belief, and any
-    ToM variant.
+    NOTE: This function may eventually need to take additional inputs (e.g. second-order beliefs)
     """
     num_agents = previous_beliefs.shape[0]
     agent_rngs = jax.random.split(rng, num_agents)
@@ -245,6 +243,8 @@ class ToMInference(InferenceStrategy):
 
     Holds the ToM search hyperparameters (static Python scalars, so they stay out of the
     traced computation) and dispatches to the ToM executor skeletons above.
+    
+    TODO: This obviously needs to be worked through.
     """
 
     speaker_n_search: int

@@ -230,12 +230,6 @@ class StackedSignificationDecPOMDP:
                     other_policy,
                     agent_id=role,
                 )
-                # ``ego_belief`` here is the PRE-update belief, and it must be: the estimate
-                # predicts forward through this step's transition itself, so passing
-                # ``new_true`` (which has already absorbed this observation) would apply the
-                # step twice. It is also the only channel by which the ego's private
-                # information reaches the estimate -- it says which states the EGO may have
-                # entered, and hence which observations its partner plausibly received.
                 new_estimate = belief_factory.update_other_belief_estimate_with_observation_only(
                     other_belief_estimate,
                     ego_belief,
@@ -505,6 +499,9 @@ class StackedSignificationDecPOMDP:
 
         # 2c. Belief stage: belief_actions is freshly populated by listeners, who adopt them
         # as their new ground-truth belief states.
+        # NOTE: Adopted verbatim, so exact zeros survive. If a listener's belief has zero mass on every
+        # state consistent with its next observation, the observation update normalizes 0/0 and the
+        # true belief becomes all-NaN (the estimate update falls back to its prior instead).
         update_listener_true_belief = on_belief_stage & agent_listens_binary_mask  # [num_agents]
         post_comm_true_beliefs = jnp.where(update_listener_true_belief[:, None], belief_actions, state.true_agent_belief_states)
 
@@ -644,7 +641,7 @@ class StackedSignificationDecPOMDP:
 
         # Each agent's initial belief IS its game's world prior -- every agent, every role.
         # (There is no per-role initial belief; see FlexibleEnvParams.)
-        # NOTE: This is subject to change in the future.
+        # NOTE: This is subject to change in the future, we may want to seed agent priors.
         agent_initial_belief_states = self.all_env_parameters.initial_state_distribution[agent_game_types]
 
         # Sample each game's true initial world state from its initial-state dist.
@@ -655,7 +652,7 @@ class StackedSignificationDecPOMDP:
         )
 
         true_agent_belief_states = agent_initial_belief_states
-        estimated_agent_belief_states = agent_initial_belief_states
+        estimated_agent_belief_states = agent_initial_belief_states     # NOTE: This is also subject to change, we may want to seed priors on estimates of belief states
         # Default (communicate-first) path: no act yet, so the no-act sentinels (NaN reward,
         # -1 action/observation).
         last_agent_rewards = jnp.full((self.num_agents,), jnp.nan, dtype=jnp.float32)
@@ -666,6 +663,7 @@ class StackedSignificationDecPOMDP:
             # Take one joint DecPOMDP step before any communication; beliefs update from
             # the resulting observation (no utterance has been exchanged yet).
             step_key, key = jax.random.split(key)
+            
             (
                 game_states,
                 true_agent_belief_states,
