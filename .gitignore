@@ -9,9 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-# Generated visualization HTML
-useful_visualizations/renders/
-
 *.DS_Store
 
 siggame_reference

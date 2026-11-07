@@ -11,7 +11,7 @@ from communication.communication_scheme import CommunicationSchemeFn
 # FlexibleEnvParams / OptimalPolicyBundle / NUM_ROLES are defined in envs.flexible_env (the leaf of
 # the env-definition dependency graph) and consumed here.
 from envs.flexible_env import NUM_ROLES, FlexibleEnvParams, OptimalPolicyBundle
-from tools.belief_representations import CategoricalBeliefState
+from tools.belief_representations import update_other_belief_estimate_with_observation_only, update_with_observation_only
 
 
 # A communicative round runs in two stages, one per step_env call; the state's
@@ -192,58 +192,48 @@ class StackedSignificationDecPOMDP:
         self.optimal_policy_bundle = optimal_policy_bundle
         self.num_game_types = all_env_parameters.transition.shape[0]
 
-        # One belief-update engine per game type, built from that type's (unstacked)
-        # params. Cardinalities are uniform across types (padded), so each is valid.
-        # Currently the reset belief updates use only type 0 (see note in reset).
-        self._belief_factories = tuple(
-            CategoricalBeliefState(jax.tree.map(lambda leaf, t=game_type: leaf[t], all_env_parameters)) for game_type in range(self.num_game_types)
-        )
-
     def _agent_belief_updates(self, game_type, role, ego_belief_probs, other_belief_estimate_probs, observation, action):
         """True-belief + other-belief-estimate update for one agent.
 
         Takes and returns raw [S] probs (the env's storage format); wraps them in
-        Categoricals here for the CategoricalBeliefState methods.
+        Categoricals here for the tools.belief_representations functions.
 
         NOTE: We may want to keep track of and update a second-order belief: what agent A
         believes agent B believes about agent A's belief state.
 
-        Conditioned on the agent's environment (``game_type``, via lax.switch over
-        the per-type belief factories) and its ``role`` (passed as the traced
-        ``agent_id`` — the belief methods now accept a traced agent_id). The other
+        Conditioned on the agent's environment (``game_type``, by gathering that game
+        type's params out of the stacked params -- the belief functions accept traced
+        params) and its ``role`` (passed as the traced ``agent_id``). The other
         agent's action is unobserved, so both updates marginalize over it via the
         other role's optimal policy. Assumes dyadic games (other role = 1 - role).
 
         Returns (new_true_belief_probs, new_other_estimate_probs).
         """
+        # This game type's (unstacked) params; game_type may be traced.
+        game_params = jax.tree.map(lambda leaf: leaf[game_type], self.all_env_parameters)
         ego_belief = distrax.Categorical(probs=ego_belief_probs)
         other_belief_estimate = distrax.Categorical(probs=other_belief_estimate_probs)
         other_policy = lambda belief: self.optimal_policy_bundle(game_type, 1 - role, belief)
 
-        def make_branch(belief_factory):
-            def branch(ego_belief, other_belief_estimate, observation, action):
-                new_true = belief_factory.update_with_observation_only(
-                    ego_belief,
-                    other_belief_estimate,
-                    observation,
-                    action,
-                    other_policy,
-                    agent_id=role,
-                )
-                new_estimate = belief_factory.update_other_belief_estimate_with_observation_only(
-                    other_belief_estimate,
-                    ego_belief,
-                    observation,
-                    action,
-                    other_policy,
-                    agent_id=role,
-                )
-                return new_true.probs, new_estimate.probs
-
-            return branch
-
-        branches = [make_branch(factory) for factory in self._belief_factories]
-        return jax.lax.switch(game_type, branches, ego_belief, other_belief_estimate, observation, action)
+        new_true = update_with_observation_only(
+            game_params,
+            ego_belief=ego_belief,
+            other_belief_estimate=other_belief_estimate,
+            ego_observation=observation,
+            ego_action=action,
+            other_policy=other_policy,
+            agent_id=role,
+        )
+        new_estimate = update_other_belief_estimate_with_observation_only(
+            game_params,
+            ego_belief=ego_belief,
+            other_belief_estimate=other_belief_estimate,
+            ego_observation=observation,
+            ego_action=action,
+            other_policy=other_policy,
+            agent_id=role,
+        )
+        return new_true.probs, new_estimate.probs
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: StackedSignificationState):

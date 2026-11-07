@@ -152,7 +152,7 @@ def guessing_game_spec(
 
 if __name__ == "__main__":
     from envs.flexible_env import FlexibleEnv
-    from tools.belief_representations import CategoricalBeliefState
+    from tools.belief_representations import update_with_observation_and_joint_action
 
     params, _ = guessing_game_spec()
     env = FlexibleEnv(params)
@@ -196,7 +196,6 @@ if __name__ == "__main__":
     # s), so each observed symbol rules out one state. Once the presser has seen
     # both non-true symbols, its belief collapses to certainty -- no communication
     # needed. Here the presser repeatedly waits, observes, and updates its belief.
-    belief_factory = CategoricalBeliefState(params)
     true_state = 0
     wait = env.num_actions - 1  # the "wait" action
     wait_joint_action = (wait, wait)  # presser waits; other agent inert
@@ -209,7 +208,7 @@ if __name__ == "__main__":
     for t in range(12):
         key, obs_key = jax.random.split(key)
         observation = distrax.Categorical(probs=presser_obs_dist).sample(seed=obs_key)
-        belief = belief_factory.update_with_observation_and_joint_action(belief, observation, wait_joint_action, agent_id=0)
+        belief = update_with_observation_and_joint_action(params, belief, observation, wait_joint_action, agent_id=0)
         identified = bool(belief.probs[true_state] > 0.999)
         note = "  <- identified the true state!" if identified else ""
         print(f"  t={t:<2}: saw symbol {int(observation)} -> belief = {belief.probs}{note}")

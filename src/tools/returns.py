@@ -19,26 +19,22 @@ import jax
 import jax.numpy as jnp
 
 from envs.flexible_env import FlexibleEnv
-from tools.belief_representations import CategoricalBeliefState
+from tools.belief_representations import update_with_observation_and_joint_action
 
 
 class ExactReturnEvaluator:
     """Exact depth-limited DecPOMDP lookahead from a single root state.
 
     The *model* is the FlexibleEnvParams; this class evaluates a policy pair
-    against it. All dynamics come from the ``belief_state_factory``
-    (CategoricalBeliefState); reward is gathered from its ``env_params.reward``.
+    against it. Dynamics and rewards are gathered directly from ``params``; belief
+    updates come from tools.belief_representations.
     """
 
-    def __init__(self, belief_state_factory):
-        self.belief_state_factory = belief_state_factory
-        self.env_params = belief_state_factory.env_params
-        self.num_unique_states = belief_state_factory.num_unique_states
-        self.num_unique_observations = belief_state_factory.num_unique_observations
-        self.num_unique_actions = belief_state_factory.num_unique_actions
-        self.joint_transition_function = belief_state_factory.joint_transition_function
-        self.joint_observation_function = belief_state_factory.joint_observation_function
-        self.joint_action_constructor = belief_state_factory.joint_action_constructor
+    def __init__(self, params):
+        self.params = params
+        self.num_states = params.transition.shape[0]
+        self.num_actions = params.transition.shape[1]
+        self.num_observations = params.observation.shape[-1]
 
     def evaluate_expected_returns(
         self,
@@ -67,19 +63,22 @@ class ExactReturnEvaluator:
         distrax.Categorical distributions and cannot be vmapped) are computed once
         per pair, outside the vmap over next states.
         """
-        belief_state_factory = self.belief_state_factory
+        params = self.params
         ego_action_dist = ego_policy(ego_belief)
         other_action_dist = other_policy(other_belief)
+        other_agent_id = 1 - ego_agent_id
 
         def as_if_ego_acts(ego_action):
             def as_if_other_acts(other_action):
-                joint_action = self.joint_action_constructor(ego_agent_id, ego_action, other_action)
-                next_state_dist = self.joint_transition_function(state, joint_action)
+                # ego_agent_id is a Python int here, so plain branching suffices.
+                joint_action = (ego_action, other_action) if ego_agent_id == 0 else (other_action, ego_action)
+                agent_0_action, agent_1_action = joint_action
+                next_state_probs = params.transition[state, agent_0_action, agent_1_action]  # [S']
 
                 # ∑_{s'} T(s'|s,a) R_ego(s,a,s'): gather the ego agent's reward row
                 # over next states and dot it with the transition distribution.
-                ego_rewards_for_each_state = self.env_params.reward[ego_agent_id, state, joint_action[0], joint_action[1], :]
-                immediate = jnp.sum(ego_rewards_for_each_state * next_state_dist.probs)
+                ego_rewards_for_each_state = params.reward[ego_agent_id, state, agent_0_action, agent_1_action, :]
+                immediate = jnp.sum(ego_rewards_for_each_state * next_state_probs)
 
                 if evaluation_depth <= 1:
                     return immediate * other_action_dist.prob(other_action)
@@ -90,32 +89,20 @@ class ExactReturnEvaluator:
                 # Total compiled graph ≈ (A²·O²·S)^(depth-1). See the function-level
                 # warning on exact_expected_returns; prefer monte_carlo_returns.
                 future = jnp.zeros(())
-                for ego_obs in range(self.num_unique_observations):
-                    for other_obs in range(self.num_unique_observations):
-                        new_ego_belief = belief_state_factory.update_with_observation_and_joint_action(
-                            ego_belief, ego_obs, joint_action, agent_id=ego_agent_id
-                        )
-                        new_other_belief = belief_state_factory.update_with_observation_and_joint_action(
-                            other_belief,
-                            other_obs,
-                            joint_action,
-                            agent_id=int(not ego_agent_id),
-                        )
+                for ego_obs in range(self.num_observations):
+                    for other_obs in range(self.num_observations):
+                        new_ego_belief = update_with_observation_and_joint_action(params, ego_belief, ego_obs, joint_action, agent_id=ego_agent_id)
+                        new_other_belief = update_with_observation_and_joint_action(params, other_belief, other_obs, joint_action, agent_id=other_agent_id)
+                        obs_0, obs_1 = (ego_obs, other_obs) if ego_agent_id == 0 else (other_obs, ego_obs)
 
                         def per_next_state(
                             next_state,
-                            _ego_obs=ego_obs,
-                            _other_obs=other_obs,
+                            _obs_0=obs_0,
+                            _obs_1=obs_1,
                             _new_ego_belief=new_ego_belief,
                             _new_other_belief=new_other_belief,
                         ):
-                            joint_obs_dist = self.joint_observation_function(next_state, joint_action)
-                            obs_prob = jax.lax.cond(
-                                ego_agent_id == 0,
-                                lambda _: belief_state_factory.joint_factory.prob(joint_obs_dist, _ego_obs, _other_obs),
-                                lambda _: belief_state_factory.joint_factory.prob(joint_obs_dist, _other_obs, _ego_obs),
-                                None,
-                            )
+                            obs_prob = params.observation[next_state, agent_0_action, agent_1_action, _obs_0, _obs_1]
                             future_v = self.evaluate_expected_returns(
                                 next_state,
                                 ego_policy,
@@ -126,15 +113,15 @@ class ExactReturnEvaluator:
                                 evaluation_depth - 1,
                                 discount_factor,
                             )
-                            return next_state_dist.prob(next_state) * obs_prob * future_v
+                            return next_state_probs[next_state] * obs_prob * future_v
 
-                        future = future + jnp.sum(jnp.nan_to_num(jax.vmap(per_next_state)(jnp.arange(self.num_unique_states))))
+                        future = future + jnp.sum(jnp.nan_to_num(jax.vmap(per_next_state)(jnp.arange(self.num_states))))
 
                 return (immediate + discount_factor * future) * other_action_dist.prob(other_action)
 
-            return jnp.sum(jax.vmap(as_if_other_acts)(jnp.arange(self.num_unique_actions))) * ego_action_dist.prob(ego_action)
+            return jnp.sum(jax.vmap(as_if_other_acts)(jnp.arange(self.num_actions))) * ego_action_dist.prob(ego_action)
 
-        return jnp.sum(jax.vmap(as_if_ego_acts)(jnp.arange(self.num_unique_actions)))
+        return jnp.sum(jax.vmap(as_if_ego_acts)(jnp.arange(self.num_actions)))
 
 
 def exact_expected_returns(
@@ -175,15 +162,14 @@ def exact_expected_returns(
         the env's ``initial_state_distribution``.
     """
     params, _ = env_spec()
-    belief_factory = CategoricalBeliefState(params)
-    evaluator = ExactReturnEvaluator(belief_factory)
+    evaluator = ExactReturnEvaluator(params)
     initial_state_distribution = params.initial_state_distribution
 
     def return_for_agent(ego_agent_id):
         ego_policy, other_policy = policies[ego_agent_id], policies[1 - ego_agent_id]
         ego_belief, other_belief = initial_beliefs[ego_agent_id], initial_beliefs[1 - ego_agent_id]
         total = jnp.zeros(())
-        for s in range(evaluator.num_unique_states):
+        for s in range(evaluator.num_states):
             total = total + initial_state_distribution[s] * evaluator.evaluate_expected_returns(
                 s,
                 ego_policy,
@@ -220,7 +206,6 @@ def monte_carlo_returns(
     """
     params, _ = env_spec()
     env = FlexibleEnv(params)
-    belief_factory = CategoricalBeliefState(params)
 
     agent_0_policy, agent_1_policy = policies
     initial_belief_agent_0, initial_belief_agent_1 = initial_beliefs
@@ -246,8 +231,8 @@ def monte_carlo_returns(
             return_0 = return_0 + discount * r0 * active
             return_1 = return_1 + discount * r1 * active
 
-            b0 = belief_factory.update_with_observation_and_joint_action(b0, next_o0, joint_action, agent_id=0)
-            b1 = belief_factory.update_with_observation_and_joint_action(b1, next_o1, joint_action, agent_id=1)
+            b0 = update_with_observation_and_joint_action(params, b0, next_o0, joint_action, agent_id=0)
+            b1 = update_with_observation_and_joint_action(params, b1, next_o1, joint_action, agent_id=1)
 
             done_after = jnp.maximum(done_before, done.astype(jnp.float32))
             carry = (next_state, b0, b1, return_0, return_1, discount * discount_factor, done_after)

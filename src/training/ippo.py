@@ -1,7 +1,7 @@
 """Independent PPO (IPPO)."""
 
 from __future__ import annotations
-from typing import Sequence
+from typing import Callable, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ from training.config import ExperimentConfig
 from training.optimizer import OptimizerConfig
 from agents.belief_agents import BeliefAgentConfig
 from agents.utterance_agents import UtteranceAgentConfig
+from communication.stacked_signification_decpomdp import StackedSignificationDecPOMDP
 from tools.utterance_rendering import paint_multiple_splines
 from tools.visualization import plot_belief_states, plot_utterances
 from training.rollout import collect_rollout
@@ -91,62 +92,73 @@ def initialize_utterance_agents(
     return _batched_train_states(network, tx, rng, num_agents, dummy_own_belief, dummy_estimate)
 
 
-def make_train(config: ExperimentConfig):
+def build_env(config: ExperimentConfig) -> StackedSignificationDecPOMDP:
+    """The stacked DecPOMDP, with the assignment and communication-scheme functions wired in.
 
-    # Each sub-config knows how to build its runtime function, so resolution is
-    # uniform: assignment -> AssignmentFn, communication -> CommunicationSchemeFn.
-    assignment_fn = config.role_assignment.build()
-    scheme_fn = config.communication.build()
-    num_agents = config.role_assignment.num_agents
-
-    # The env config assembles the stacked DecPOMDP params + optimal-policy table from
-    # the selected games and wires in the two runtime functions above.
-    env = config.environment.build(
-        num_agents=num_agents,
-        assignment_fn=assignment_fn,
-        communication_scheme_fn=scheme_fn,
+    The env config assembles the stacked params + optimal-policy bundle from the selected
+    games. Shared by ``make_train`` and ``training.inspect_rollout``.
+    """
+    return config.environment.build(
+        num_agents=config.role_assignment.num_agents,
+        assignment_fn=config.role_assignment.build(),
+        communication_scheme_fn=config.communication.build(),
     )
 
-    # Env-derived shapes the agents need. belief_dim is the (padded) world-state
-    # cardinality (length of every belief vector). A belief agent consumes a rendered
-    # utterance image of side utterance_image_dim; the utterance agent emits a flat
-    # utterance of length utterance_action_dim (which must match the env's).
+
+def make_render_utterance_fn(image_dim: int) -> Callable:
+    """``(rng, utterances) -> images``: paint each flat utterance onto an image_dim canvas.
+
+    The rng is unused today but kept in the signature so stochastic rendering (jitter,
+    sampled ink) can be added later without touching call sites.
+    """
+    return lambda rng, utterances: paint_multiple_splines(utterances, image_dim)
+
+
+def initialize_agents(config: ExperimentConfig, env: StackedSignificationDecPOMDP, rng) -> Tuple[TrainState, TrainState]:
+    """Both populations, freshly initialized: ``(belief_train_states, utterance_train_states)``.
+
+    One independent population per role -- ``num_agents`` belief agents and ``num_agents``
+    utterance agents, each a distinct parameter set + optimizer state batched under a
+    leading ``num_agents`` axis. Shapes come from the env (``belief_dim``, the padded
+    world-state cardinality) and the env config (utterance length and canvas size).
+    Shared by ``make_train`` and ``training.inspect_rollout``.
+    """
+    num_agents = config.role_assignment.num_agents
+    image_dim = config.environment.utterance_image_dim
+    belief_rng, utterance_rng = jax.random.split(rng)
+    belief_train_states = initialize_belief_agents(
+        config.belief_agents,
+        config.belief_optimizer,
+        belief_rng,
+        num_agents,
+        input_utterance_shape=(image_dim, image_dim),
+        belief_dim=env.belief_dim,
+    )
+    utterance_train_states = initialize_utterance_agents(
+        config.utterance_agents,
+        config.utterance_optimizer,
+        utterance_rng,
+        num_agents,
+        utterance_action_dim=config.environment.utterance_action_dim,
+        belief_dim=env.belief_dim,
+    )
+    return belief_train_states, utterance_train_states
+
+
+def make_train(config: ExperimentConfig):
+    env = build_env(config)
+    num_agents = config.role_assignment.num_agents
     belief_dim = env.belief_dim
-    utterance_action_dim = config.environment.utterance_action_dim
     image_dim = config.environment.utterance_image_dim
     input_utterance_shape = (image_dim, image_dim)
-
-    # Belief agents consume a rendered utterance image; the rollout paints each raw
-    # utterance vector onto an (image_dim x image_dim) canvas via this closure. The leading
-    # rng is unused today but kept in the signature so stochastic rendering (e.g. jitter /
-    # sampled ink) can be added later without touching every call site.
-    render_utterance_fn = lambda rng, utterances: paint_multiple_splines(utterances, image_dim)
-
+    render_utterance_fn = make_render_utterance_fn(image_dim)
     # How agents reason during rollouts (first-order vs. ToM); resolved once here and
     # threaded into every env_step by collect_rollout.
     inference_strategy = config.inference.build()
 
     def train(rng):
-        # One independent population per role: num_agents belief agents and num_agents
-        # utterance agents, each a distinct parameter set + optimizer state batched under
-        # a leading num_agents axis.
-        belief_rng, utterance_rng, env_rng, loop_rng = jax.random.split(rng, 4)
-        belief_train_states = initialize_belief_agents(
-            config.belief_agents,
-            config.belief_optimizer,
-            belief_rng,
-            num_agents,
-            input_utterance_shape=input_utterance_shape,
-            belief_dim=belief_dim,
-        )
-        utterance_train_states = initialize_utterance_agents(
-            config.utterance_agents,
-            config.utterance_optimizer,
-            utterance_rng,
-            num_agents,
-            utterance_action_dim=utterance_action_dim,
-            belief_dim=belief_dim,
-        )
+        agent_rng, env_rng, loop_rng = jax.random.split(rng, 3)
+        belief_train_states, utterance_train_states = initialize_agents(config, env, agent_rng)
 
         def run_debug():
             """DEBUG-only: push random inputs through every agent and collect their outputs.

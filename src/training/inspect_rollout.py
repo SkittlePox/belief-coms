@@ -21,9 +21,8 @@ import numpy as np
 import tyro
 
 from communication.stacked_signification_decpomdp import UTTERANCE_STAGE
-from tools.utterance_rendering import paint_multiple_splines
 from training.config import ExperimentConfig
-from training.ippo import initialize_belief_agents, initialize_utterance_agents
+from training.ippo import build_env, initialize_agents, make_render_utterance_fn
 from training.rollout import env_step
 
 
@@ -35,42 +34,22 @@ def run_rollout(config: ExperimentConfig, num_steps: int):
     state AFTER step t (so the state step t acted from is ``env_states[t - 1]``, or
     ``initial_env_state`` for t = 0).
     """
-    num_agents = config.role_assignment.num_agents
-    env = config.environment.build(
-        num_agents=num_agents,
-        assignment_fn=config.role_assignment.build(),
-        communication_scheme_fn=config.communication.build(),
-    )
+    env = build_env(config)
     image_dim = config.environment.utterance_image_dim
-    render_utterance_fn = lambda rng, utterances: paint_multiple_splines(utterances, image_dim)
-    inference_strategy = config.inference.build()
 
+    # Same split as make_train's train(rng), so a given jax_seed inspects the same agents
+    # and reset that training would start from.
     rng = jax.random.key(config.jax_seed)
-    belief_rng, utterance_rng, env_rng, rollout_rng = jax.random.split(rng, 4)
-    belief_train_states = initialize_belief_agents(
-        config.belief_agents,
-        config.belief_optimizer,
-        belief_rng,
-        num_agents,
-        input_utterance_shape=(image_dim, image_dim),
-        belief_dim=env.belief_dim,
-    )
-    utterance_train_states = initialize_utterance_agents(
-        config.utterance_agents,
-        config.utterance_optimizer,
-        utterance_rng,
-        num_agents,
-        utterance_action_dim=config.environment.utterance_action_dim,
-        belief_dim=env.belief_dim,
-    )
+    agent_rng, env_rng, rollout_rng = jax.random.split(rng, 3)
+    belief_train_states, utterance_train_states = initialize_agents(config, env, agent_rng)
     env_state, obs = env.reset(env_rng)
 
     step_fn = partial(
         env_step,
         env=env,
-        render_utterance_fn=render_utterance_fn,
+        render_utterance_fn=make_render_utterance_fn(image_dim),
         utterance_image_dim=image_dim,
-        inference_strategy=inference_strategy,
+        inference_strategy=config.inference.build(),
     )
 
     def traced_step(carry, _):
