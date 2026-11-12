@@ -1,8 +1,8 @@
-"""Categorical belief updates for a dyadic DecPOMDP, as pure functions of its params.
+"""Categorical belief updates for a dyadic DecPOMDP, as pure functions of its env_params.
 
 Every function takes a single game's ``FlexibleEnvParams`` as its first argument. They
-read only array shapes and contents -- never ``int(params.num_states)`` -- so ``params``
-may itself be traced, e.g. one game type gathered out of the stacked params with a
+read only array shapes and contents -- never ``int(env_params.num_states)`` -- so ``env_params``
+may itself be traced, e.g. one game type gathered out of the stacked env_params with a
 traced index. Cardinalities come from the (possibly padded) tensor shapes; padded
 states and actions carry zero probability, so they drop out of every sum.
 
@@ -17,48 +17,38 @@ my observation, your observation" -- so ``ego_frame`` swaps the agent axes once,
 the ego is agent 1. Everything downstream is then written for the ego alone, with no
 per-agent branching:
 
-    T[s, a_ego, a_other, s']                    from params.transition  [S, A, A, S]
-    O[s', a_ego, a_other, o_ego, o_other]       from params.observation [S, A, A, O, O]
+    T[s, a_ego, a_other, s']                    from env_params.transition  [S, A, A, S]
+    O[s', a_ego, a_other, o_ego, o_other]       from env_params.observation [S, A, A, O, O]
 
 ``agent_id`` is always the EGO's id (0 or 1) and may be traced.
+
+Impossible observations
+-----------------------
+There are no fallbacks. If an observation has zero likelihood under the belief, the
+final normalization divides by zero and the returned belief is NaN. The environment
+should never produce such an observation, so a NaN belief deliberately points at a
+problem elsewhere rather than being papered over.
 """
 
 import distrax
 import jax.numpy as jnp
 
 
-def ego_frame(params, agent_id):
-    """Transition and observation tensors with the agent axes ordered (ego, other).
+def ego_frame(env_params, agent_id):
+    """This function reframes Transition and observation tensors so that they are also ego-centric.
 
     Returns ``(T, O)`` with ``T[s, a_ego, a_other, s']`` and
     ``O[s', a_ego, a_other, o_ego, o_other]``. ``agent_id`` may be traced: both
     orderings are built and one is selected, which is cheap for tensors this size.
     """
-    T, O = params.transition, params.observation
+    T, O = env_params.transition, env_params.observation
     is_agent_0 = agent_id == 0
     T = jnp.where(is_agent_0, T, T.swapaxes(1, 2))
     O = jnp.where(is_agent_0, O, O.swapaxes(1, 2).swapaxes(3, 4))
     return T, O
 
 
-def _normalize(unnormalized, fallback=None):
-    """``unnormalized / sum``.
-
-    A zero sum means the evidence was impossible under the model (e.g. an
-    observation that no state reachable from the belief can emit). With no
-    ``fallback`` this deliberately returns NaN: the environment should never
-    produce such an observation, so a NaN belief points at a bug upstream rather
-    than being papered over. With a ``fallback``, that is returned instead (the
-    inner ``where`` keeps the gradient finite too).
-    """
-    total = jnp.sum(unnormalized)
-    if fallback is None:
-        return unnormalized / total
-    safe_total = jnp.where(total > 0, total, 1.0)
-    return jnp.where(total > 0, unnormalized / safe_total, fallback)
-
-
-def update_with_observation_and_joint_action(params, belief, observation, joint_action, agent_id):
+def update_with_observation_and_joint_action(env_params, belief, observation, joint_action, agent_id):
     """Bayesian belief update when the full joint action is known.
 
         b'(s') ∝ O_ego(o | s', a) · ∑_s T(s' | s, a) b(s)
@@ -66,8 +56,10 @@ def update_with_observation_and_joint_action(params, belief, observation, joint_
     where O_ego is the ego's marginal of the joint observation model (the other
     agent's observation summed out).
 
+    NOTE: This is mostly for learning purposes, the model doesn't actually use this.
+
     Args:
-        params: A single game's FlexibleEnvParams.
+        env_params: A single game's FlexibleEnvParams.
         belief: The ego's current belief b(s), a distrax.Categorical over states.
         observation: The ego's observation at this timestep.
         joint_action: ``(agent_0_action, agent_1_action)`` -- agent order, not ego order.
@@ -75,25 +67,26 @@ def update_with_observation_and_joint_action(params, belief, observation, joint_
 
     Returns:
         b'(s') as a distrax.Categorical. All NaN if the observation is impossible
-        under the model (see ``_normalize``).
+        under the model (see the module docstring).
     """
-    T, O = ego_frame(params, agent_id)
+    T, O = ego_frame(env_params, agent_id)
     agent_0_action, agent_1_action = joint_action
     ego_action = jnp.where(agent_id == 0, agent_0_action, agent_1_action)
     other_action = jnp.where(agent_id == 0, agent_1_action, agent_0_action)
 
     predicted = belief.probs @ T[:, ego_action, other_action]  # [S']
     likelihood = O[:, ego_action, other_action, observation, :].sum(-1)  # [S']
-    return distrax.Categorical(probs=_normalize(predicted * likelihood))
+    unnormalized = predicted * likelihood
+    return distrax.Categorical(probs=unnormalized / unnormalized.sum())
 
 
 def update_with_observation_only(
-    params,
+    env_params,
     *,
     ego_belief,
     other_belief_estimate,
     ego_observation,
-    ego_action,
+    ego_action_tminus1,
     other_policy,
     agent_id,
 ):
@@ -107,7 +100,7 @@ def update_with_observation_only(
     with a = (ego_action, a_other).
 
     Args:
-        params: A single game's FlexibleEnvParams.
+        env_params: A single game's FlexibleEnvParams.
         ego_belief: The ego's current belief b(s), a distrax.Categorical.
         other_belief_estimate: The ego's estimate of the other agent's belief b̄,
             fed to ``other_policy``.
@@ -119,18 +112,18 @@ def update_with_observation_only(
 
     Returns:
         b'(s') as a distrax.Categorical. All NaN if the observation is impossible
-        under the model (see ``_normalize``).
+        under the model (see the module docstring).
     """
-    T, O = ego_frame(params, agent_id)
+    T, O = ego_frame(env_params, agent_id)
     other_action_probs = other_policy(other_belief_estimate).probs  # [A_other]
 
-    predicted = jnp.einsum("s,sxt->xt", ego_belief.probs, T[:, ego_action])  # [A_other, S']
-    likelihood = O[:, ego_action, :, ego_observation, :].sum(-1).T  # [A_other, S']
+    predicted = jnp.einsum("s,sxt->xt", ego_belief.probs, T[:, ego_action_tminus1])  # [A_other, S']
+    likelihood = O[:, ego_action_tminus1, :, ego_observation, :].sum(-1).T  # [A_other, S']
     unnormalized = other_action_probs @ (predicted * likelihood)
-    return distrax.Categorical(probs=_normalize(unnormalized))
+    return distrax.Categorical(probs=unnormalized / unnormalized.sum())
 
 
-def initial_belief(params, ego_observation, agent_id, reset_action=0):
+def initial_belief(env_params, ego_observation, agent_id, reset_action=0):
     """The ego's own belief at t=0, from the reset observation.
 
         b_0(s) ∝ P0(s) · O_ego(o_0 | s, reset_action)
@@ -146,15 +139,16 @@ def initial_belief(params, ego_observation, agent_id, reset_action=0):
 
     Returns:
         b_0 as a distrax.Categorical. All NaN if the observation is impossible under
-        the prior (see ``_normalize``).
+        the prior (see the module docstring).
     """
-    _, O = ego_frame(params, agent_id)
-    prior = params.initial_state_distribution
+    _, O = ego_frame(env_params, agent_id)
+    prior = env_params.initial_state_distribution
     likelihood = O[:, reset_action, reset_action, ego_observation, :].sum(-1)  # [S]
-    return distrax.Categorical(probs=_normalize(prior * likelihood))
+    unnormalized = prior * likelihood
+    return distrax.Categorical(probs=unnormalized / unnormalized.sum())
 
 
-def initial_other_belief_estimate(params, ego_observation, agent_id, reset_action=0):
+def initial_other_belief_estimate(env_params, ego_observation, agent_id, reset_action=0):
     """The ego's estimate of the other agent's belief at t=0, from the reset observation.
 
     The reset observation has no action before it, so it cannot go through
@@ -174,25 +168,27 @@ def initial_other_belief_estimate(params, ego_observation, agent_id, reset_actio
     ``reset_action`` is as in ``initial_belief``.
 
     Returns:
-        b̄_0 as a distrax.Categorical; the prior if the observation is impossible.
+        b̄_0 as a distrax.Categorical. All NaN if the observation is impossible
+        under the prior (see the module docstring).
     """
-    _, O = ego_frame(params, agent_id)
-    prior = params.initial_state_distribution
+    _, O = ego_frame(env_params, agent_id)
+    prior = env_params.initial_state_distribution
     O_reset = O[:, reset_action, reset_action]  # [S, O_ego, O_other]
 
     weights = prior @ O_reset[:, ego_observation, :]  # [O_other]
     posteriors = (prior[:, None] * O_reset.sum(1)).T  # [O_other, S]
     mass = posteriors.sum(1, keepdims=True)
+    # Not a fallback: hypothetical o_other the partner could never see have zero mass
+    # AND zero weight below. Dividing them by 1 instead of 0 keeps their 0/0 from turning
+    # an otherwise healthy estimate into NaN.
     posteriors = posteriors / jnp.where(mass > 0, mass, 1.0)
 
-    # NOTE: Unlike initial_belief, this falls back to the prior (rather than NaN) when the
-    # ego's reset observation is impossible under the prior. Consider dropping the fallback
-    # so an impossible reset observation surfaces as NaN, as it does in initial_belief.
-    return distrax.Categorical(probs=_normalize(weights @ posteriors, prior))
+    unnormalized = weights @ posteriors
+    return distrax.Categorical(probs=unnormalized / unnormalized.sum())
 
 
 def update_other_belief_estimate_with_observation_only(
-    params,
+    env_params,
     *,
     ego_belief,
     other_belief_estimate,
@@ -281,7 +277,7 @@ def update_other_belief_estimate_with_observation_only(
     For the exact treatment see memo-decpomdp's build_recursive_belief_model.
 
     Args:
-        params: A single game's FlexibleEnvParams.
+        env_params: A single game's FlexibleEnvParams.
         ego_belief: The EGO's OWN belief at the previous timestep (from
             ``update_with_observation_only``, or ``initial_belief`` at reset). It is the
             only channel by which the ego's private knowledge reaches the estimate (step
@@ -301,15 +297,15 @@ def update_other_belief_estimate_with_observation_only(
         mode: "mixture" (default) or "soft_evidence"; a static Python string.
 
     Returns:
-        b̄' as a distrax.Categorical. If every branch has zero weight -- an
-        (a_ego, o_ego) this estimate says is impossible -- b̄ is returned unchanged.
+        b̄' as a distrax.Categorical. All NaN if every branch has zero weight, i.e.
+        o_ego is impossible under pred_ego and π*(b̄) (see the module docstring).
     """
     if ego_belief is None:
         raise ValueError("ego_belief is required; pass the ego's own belief, not b̄ (see docstring).")
     if mode not in ("mixture", "soft_evidence"):
         raise ValueError(f"mode must be 'mixture' or 'soft_evidence', got {mode!r}")
 
-    T, O = ego_frame(params, agent_id)
+    T, O = ego_frame(env_params, agent_id)
     num_actions = T.shape[1]
     if ego_action_prior is None:
         ego_action_prior = jnp.ones(num_actions) / num_actions
@@ -329,14 +325,11 @@ def update_other_belief_estimate_with_observation_only(
     posteriors = jnp.einsum("h,hxt,thxj->xjt", ego_action_prior, predicted_other, other_obs_marginal)  # [X, O_other, S']
     if mode == "mixture":
         mass = posteriors.sum(-1, keepdims=True)
+        # Not a fallback: hypothetical o_other the partner could never see have zero mass
+        # AND zero weight below. Dividing them by 1 instead of 0 keeps their 0/0 from turning
+        # an otherwise healthy estimate into NaN.
         posteriors = posteriors / jnp.where(mass > 0, mass, 1.0)
 
     # 5. Average over everything we cannot see.
     unnormalized = jnp.einsum("xj,xjt->t", weights, posteriors)
-    # NOTE: Unlike update_with_observation_only, this falls back to b̄ unchanged (rather
-    # than NaN) when every (a_other, o_other) branch has zero weight, i.e. o_ego is
-    # impossible under pred_ego and π*(b̄). Consider dropping the fallback so this surfaces
-    # as NaN too. Caveat: it can also fire when b̄ is merely inaccurate -- π*(b̄) giving zero
-    # probability to the partner's real action -- not only on an environment bug (the same
-    # is true of update_with_observation_only, which already NaNs).
-    return distrax.Categorical(probs=_normalize(unnormalized, other_belief_estimate.probs))
+    return distrax.Categorical(probs=unnormalized / unnormalized.sum())

@@ -20,12 +20,15 @@ UTTERANCE_STAGE = 0  # the speaker emits an utterance / message action
 BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 
 
-# Terminology
-# -----------
-# ROUND:  One speaker->listener utterance exchange, spanning TWO step_env calls
+# Terminology (units of time, smallest to largest)
+# ------------------------------------------------
+# STAGE:  One step_env call -- either an UTTERANCE_STAGE or a BELIEF_STAGE. The unit the
+#         training rollout scans over (ExperimentConfig.rollout_length counts stages).
+# ROUND:  One speaker->listener utterance exchange, spanning TWO stages
 #         (UTTERANCE_STAGE then BELIEF_STAGE). Each round entails speaking AND listening.
 # BLOCK:  The full CommunicationScheme between two underlying-env steps: a sequence of
 #         rounds. The block's last round's belief stage also steps the DecPOMDP ("act").
+# ACT:    One step of the underlying DecPOMDP, taken on the final belief stage of a block.
 # EPISODE: A complete sequence of blocks; ends when underlying_env_timestep hits episode_horizon,
 #          at which point assignment_fn re-assigns agents to games/roles.
 #
@@ -61,7 +64,7 @@ class DialogState:
     active_who_speaks: chex.Array  # [num_rounds (padded), num_speakers]
     active_total_num_rounds: chex.Array  # scalar int: real round count of the active block (excludes padding)
     communication_round_iterator: chex.Array  # scalar int: round within the active block (0..total_num_rounds-1)
-    cumulative_communication_round_iterator: chex.Array  # scalar int: total step_env calls; never resets
+    cumulative_stage_count: chex.Array  # scalar int: total step_env calls; never resets
     communicative_round_stage: chex.Array  # scalar int: UTTERANCE_STAGE or BELIEF_STAGE
 
 
@@ -220,7 +223,7 @@ class StackedSignificationDecPOMDP:
             ego_belief=ego_belief,
             other_belief_estimate=other_belief_estimate,
             ego_observation=observation,
-            ego_action=action,
+            ego_action_tminus1=action,
             other_policy=other_policy,
             agent_id=role,
         )
@@ -588,7 +591,7 @@ class StackedSignificationDecPOMDP:
             active_who_speaks=jnp.where(ends_in_act_phase, block_after_act.who_speaks, state.dialog.active_who_speaks),
             active_total_num_rounds=jnp.where(ends_in_act_phase, block_after_act.total_num_rounds, state.dialog.active_total_num_rounds),
             communication_round_iterator=next_round_cursor,
-            cumulative_communication_round_iterator=state.dialog.cumulative_communication_round_iterator + 1,
+            cumulative_stage_count=state.dialog.cumulative_stage_count + 1,
             communicative_round_stage=jnp.where(on_belief_stage, UTTERANCE_STAGE, BELIEF_STAGE),
         )
 
@@ -718,7 +721,7 @@ class StackedSignificationDecPOMDP:
                 active_who_speaks=active_scheme.who_speaks,
                 active_total_num_rounds=active_scheme.total_num_rounds,
                 communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
-                cumulative_communication_round_iterator=jnp.asarray(0, dtype=jnp.int32),
+                cumulative_stage_count=jnp.asarray(0, dtype=jnp.int32),
                 # Reset starts on the utterance stage (the speaker emits first).
                 communicative_round_stage=jnp.asarray(UTTERANCE_STAGE, dtype=jnp.int32),
             ),
@@ -842,7 +845,7 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
             f"stage={int(st.dialog.communicative_round_stage)} "
             f"round={int(st.dialog.communication_round_iterator)} "
             f"env_iter={int(st.game_counters.underlying_env_timestep)} "
-            f"comm={int(st.dialog.cumulative_communication_round_iterator)}"
+            f"stages={int(st.dialog.cumulative_stage_count)}"
         )
 
     print("=== a_to_b_thrice example (1 block = 3 rounds = 6 step_env calls) ===")
@@ -888,9 +891,9 @@ if __name__ == "__main__":
     print("active who_speaks:  ", state.dialog.active_who_speaks.tolist())
     print("active rounds:      ", state.dialog.active_total_num_rounds)
     print(
-        "round iters (u,c):  ",
+        "round iter, stages: ",
         state.dialog.communication_round_iterator,
-        state.dialog.cumulative_communication_round_iterator,
+        state.dialog.cumulative_stage_count,
     )
     print("round stage:        ", state.dialog.communicative_round_stage)
     print("true beliefs[0]:    ", state.true_agent_belief_states[0])
@@ -1013,7 +1016,7 @@ if __name__ == "__main__":
             f"stage={int(st.dialog.communicative_round_stage)} "
             f"round={int(st.dialog.communication_round_iterator)} "
             f"env_iter={int(st.game_counters.underlying_env_timestep)} "
-            f"comm={int(st.dialog.cumulative_communication_round_iterator)}"
+            f"stages={int(st.dialog.cumulative_stage_count)}"
         )
 
     print("=== step_env scheduling walk (a_to_b_thrice: 3 rounds/block) ===")

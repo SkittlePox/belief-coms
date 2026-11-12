@@ -55,7 +55,7 @@ class PPOConfig:
     ent_coef: float = 0.01  # entropy-bonus weight
     update_epochs: int = 4  # passes over the rollout, per population, per iteration
     num_minibatches: int = 4  # minibatches the step axis is split into each epoch
-    # (num_steps_per_epoch must be divisible by num_minibatches)
+    # (rollout_length must be divisible by num_minibatches)
 
 
 def _ppo_loss(params, apply_fn, net_input_0, net_input_1, actions, old_log_probs, old_values, advantages, targets, stage_mask, clip_eps, vf_coef, ent_coef):
@@ -159,7 +159,7 @@ def _update_population(rng, train_states, net_input_0, net_input_1, actions, old
     """
     num_steps = stage_mask.shape[0]
     assert num_steps % config.num_minibatches == 0, (
-        f"num_steps_per_epoch ({num_steps}) must be divisible by num_minibatches "
+        f"rollout_length ({num_steps}) must be divisible by num_minibatches "
         f"({config.num_minibatches})"
     )
     minibatch_size = num_steps // config.num_minibatches

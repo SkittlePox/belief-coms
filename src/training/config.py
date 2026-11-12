@@ -31,11 +31,12 @@ class ExperimentConfig:
     """Full run config."""
 
     jax_seed: int = 42
-    # Number of _update_step iterations the training loop scans through.
-    num_epochs: int = 100
-    # Number of env (step_env) stages collected per rollout, i.e. the length of the
-    # env_step scan inside each _update_step.
-    num_steps_per_epoch: int = 128
+    # Number of training iterations (rollout + PPO update, i.e. _update_step calls) the
+    # training loop scans through.
+    num_iterations: int = 100
+    # Number of STAGES (step_env calls, not underlying-env acts, e.g. UTTERANCE or BELIEF stages) collected per rollout,
+    # i.e. the length of the env_step scan inside each _update_step.
+    rollout_length: int = 128
     # GAE discount and trace-decay, used to turn rollouts into advantages/value targets.
     gamma: float = 0.99
     gae_lambda: float = 0.95

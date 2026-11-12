@@ -92,7 +92,7 @@ use them, with the same `(agent, env, loop/rollout)` key split, so a given `jax_
 inspects exactly the agents and reset that training starts from. (`ippo.py` is kept to
 functions only — no runtime container class.)
 
-**T4. Time vocabulary.** "Epoch" and "step" are both overloaded: `num_epochs` = training
+~~**T4. Time vocabulary.**~~ "Epoch" and "step" are both overloaded: `num_epochs` = training
 iterations, `PPOConfig.update_epochs` = passes over a rollout, `num_steps_per_epoch` =
 `step_env` calls per rollout (stages, not env steps), and
 `cumulative_communication_round_iterator` counts stages, not rounds.
@@ -107,9 +107,9 @@ Decided 2026-11-07:
   `num_minibatches` keep their standard PPO names, so "epoch" means only a PPO pass.
 - `cumulative_communication_round_iterator` → `cumulative_stage_count` (overlaps T6).
 
-Renames not yet applied (touch `training/config.py`, `ippo.py`, `ppo_update.py`, the stacked
-env, and `tests/stacked_harness.py`). Note the `--num-epochs` / `--num-steps-per-epoch` CLI
-flags change with them.
+~~Renames~~ applied 2026-11-07 in `training/config.py`, `ippo.py`, `ppo_update.py`, the
+stacked env (field, debug prints, and the Terminology comment, which now lists STAGE and ACT)
+and `tests/stacked_harness.py`. CLI flags are now `--num-iterations` / `--rollout-length`.
 
 ---
 
@@ -176,7 +176,8 @@ covered into `tests/` and delete the rest.
 - `get_obs(key, ...)` never uses `key`.
 - One flag, two names: `skip_first_communication_step` (constructor / config) vs
   `act_on_reset_before_communicating` (attribute).
-- `cumulative_communication_round_iterator` counts `step_env` calls, not rounds.
+- ~~`cumulative_communication_round_iterator` counts `step_env` calls, not rounds~~ —
+  renamed `cumulative_stage_count` (T4).
 
 ~~`_belief_factories` + `lax.switch` over game types~~ — done by the belief-state refactor
 (params are gathered with a traced `game_type`).

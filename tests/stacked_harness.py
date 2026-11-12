@@ -87,7 +87,7 @@ def schedule(state: StackedSignificationState) -> tuple:
         int(state.dialog.communication_round_iterator),
         int(state.game_counters.underlying_env_timestep),
         int(state.game_counters.cumulative_env_timestep),
-        int(state.dialog.cumulative_communication_round_iterator),
+        int(state.dialog.cumulative_stage_count),
         int(state.game_counters.episode_index),
     )
 

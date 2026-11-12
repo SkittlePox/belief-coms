@@ -248,14 +248,14 @@ def make_train(config: ExperimentConfig):
         # internally -- so a single reset is all it needs; see StackedSignificationDecPOMDP.)
         env_state, init_obs = env.reset(env_rng)
 
-        # One _update_step is a single training iteration; we scan it num_epochs times.
+        # One _update_step is a single training iteration; we scan it num_iterations times.
         # The carry is both populations' train states, the env state, and the iteration
         # counter -- each TrainState already holds its own optimizer state (opt_state) and
         # step, so nothing else is needed. Per-iteration randomness is derived by folding the
-        # iteration index into the base loop key rather than pre-splitting num_epochs keys via
+        # iteration index into the base loop key rather than pre-splitting num_iterations keys via
         # xs: with potentially very many iterations, materializing that whole key array up
         # front is wasteful, whereas fold_in costs nothing to carry. The scanned output is
-        # per-iteration metrics, stacked along the leading (epoch) axis.
+        # per-iteration metrics, stacked along the leading (iteration) axis.
         def _update_step(carry, _):
             belief_train_states, utterance_train_states, env_state, last_obs, iteration = carry
             step_rng = jax.random.fold_in(loop_rng, iteration)
@@ -272,7 +272,7 @@ def make_train(config: ExperimentConfig):
                 env_state,
                 last_obs,
                 rollout_rng,
-                config.num_steps_per_epoch,
+                config.rollout_length,
                 render_utterance_fn,
                 image_dim,
                 inference_strategy,
@@ -312,7 +312,7 @@ def make_train(config: ExperimentConfig):
             _update_step,
             initial_carry,
             xs=None,
-            length=config.num_epochs,
+            length=config.num_iterations,
         )
 
         return dict(
