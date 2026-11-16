@@ -206,7 +206,7 @@ class StackedSignificationDecPOMDP:
 
         Conditioned on the agent's environment (``game_type``, by gathering that game
         type's params out of the stacked params -- the belief functions accept traced
-        params) and its ``role`` (passed as the traced ``agent_role``). The other
+        params) and its ``role`` (passed as the traced ``ego_role``). The other
         agent's action is unobserved, so both updates marginalize over it via the
         other role's optimal policy. Assumes dyadic games (other role = 1 - role).
 
@@ -217,6 +217,10 @@ class StackedSignificationDecPOMDP:
         ego_belief = distrax.Categorical(probs=ego_belief_probs)
         other_belief_estimate = distrax.Categorical(probs=other_belief_estimate_probs)
         other_policy = lambda belief: self.optimal_policy_bundle(game_type, 1 - role, belief)
+        # NOTE: uniform until we track a second-order estimate (what we estimate the other
+        # agent believes we believe); then this becomes our policy applied to that estimate.
+        num_actions = game_params.transition.shape[1]
+        ego_action_prior = distrax.Categorical(probs=jnp.ones(num_actions) / num_actions)
 
         new_true = update_with_observation_only(
             game_params,
@@ -225,7 +229,7 @@ class StackedSignificationDecPOMDP:
             ego_observation=observation,
             ego_action_tminus1=action,
             other_policy=other_policy,
-            agent_role=role,
+            ego_role=role,
         )
         new_estimate = update_other_belief_estimate_with_observation_only(
             game_params,
@@ -233,8 +237,9 @@ class StackedSignificationDecPOMDP:
             other_belief_estimate=other_belief_estimate,
             ego_observation=observation,
             ego_action=action,
-            other_policy=other_policy,
-            agent_role=role,
+            other_action_distribution=other_policy(other_belief_estimate),
+            ego_role=role,
+            ego_action_prior=ego_action_prior,
         )
         return new_true.probs, new_estimate.probs
 

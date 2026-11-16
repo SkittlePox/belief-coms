@@ -208,7 +208,7 @@ if __name__ == "__main__":
     for t in range(12):
         key, obs_key = jax.random.split(key)
         observation = distrax.Categorical(probs=presser_obs_dist).sample(seed=obs_key)
-        belief = update_with_observation_and_joint_action(params, belief, observation, wait_joint_action, agent_role=0)
+        belief = update_with_observation_and_joint_action(params, belief, observation, wait_joint_action, ego_role=0)
         identified = bool(belief.probs[true_state] > 0.999)
         note = "  <- identified the true state!" if identified else ""
         print(f"  t={t:<2}: saw symbol {int(observation)} -> belief = {belief.probs}{note}")

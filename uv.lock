@@ -39,7 +39,6 @@ dependencies = [
     { name = "distrax" },
     { name = "flax" },
     { name = "matplotlib" },
-    { name = "memo-lang" },
     { name = "optax" },
     { name = "tyro" },
     { name = "wandb" },
@@ -55,7 +54,6 @@ requires-dist = [
     { name = "distrax", specifier = ">=0.1.5" },
     { name = "flax", specifier = ">=0.10.4" },
     { name = "matplotlib", specifier = ">=3.11.2" },
-    { name = "memo-lang", specifier = ">=1.2.23" },
     { name = "optax", specifier = ">=0.2.5" },
     { name = "tyro", specifier = ">=1.0.15" },
     { name = "wandb", specifier = ">=0.28.0" },
@@ -733,18 +731,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
-]
-
-[[package]]
-name = "memo-lang"
-version = "1.2.23"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jax" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/5b/070bfcf3cc79938e0db5a703cddf2c3a09313563ef9f7b2a6f467e33132a/memo_lang-1.2.23.tar.gz", hash = "sha256:872bc310bba07d852ca3f268f2b354d41ad0f892ee56036841126a31acc733b6", size = 37330, upload-time = "2026-06-23T21:54:23.159Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/c8/82e3306c01c989273ece8457c9f6a610ecc58453e0ea177b3fec51fdb6b6/memo_lang-1.2.23-py3-none-any.whl", hash = "sha256:cfd17ef418f40b3878118c49fb682851bdc61ab452f8900ed40d757c1cd67229", size = 31525, upload-time = "2026-06-23T21:54:22.216Z" },
 ]
 
 [[package]]
