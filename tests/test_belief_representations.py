@@ -23,7 +23,9 @@ from envs.guessing_game import (
 from tools.belief_representations import (
     initial_belief,
     initial_other_belief_estimate,
+    initial_second_order_ego_estimate,
     update_other_belief_estimate_with_observation_only,
+    update_second_order_ego_estimate_with_observation_only,
     update_with_observation_and_joint_action,
     update_with_observation_only,
 )
@@ -202,6 +204,37 @@ def test_the_reset_observation_beats_the_prior():
     assert not np.allclose(blind, looking, atol=1e-2)
 
 
+def test_initial_second_order_ego_estimate_worked_example():
+    """Our estimate of THEIR estimate of our belief, right after reset (guessing game).
+
+    Agent 0 (the ego) sees symbol 1. The two agents always see different symbols, both
+    different from the state, so:
+
+      - state 0: they saw 2.  state 2: they saw 0.  50/50.
+
+    They don't know what we saw, so each of their observations leaves them with two
+    possibilities for us:
+
+      - They saw 2 -> state 0 (we saw 1, believe [1/2, 0, 1/2, 0])
+                   or state 1 (we saw 0, believe [0, 1/2, 1/2, 0]).
+        Their estimate of us: [1/4, 1/4, 1/2, 0].
+      - They saw 0 -> state 1 (we saw 2, believe [1/2, 1/2, 0, 0])
+                   or state 2 (we saw 1, believe [1/2, 0, 1/2, 0]).
+        Their estimate of us: [1/2, 1/4, 1/4, 0].
+
+    Averaging the two: [3/8, 1/4, 3/8, 0]. Our own belief is [1/2, 0, 1/2, 0], but we
+    expect them to think we still hold state 1 at 1/4 -- they never saw our symbol.
+    """
+    params, _ = guessing_game_spec()
+
+    # Premise: their estimate of us, for each of the two observations they could have had.
+    np.testing.assert_allclose(initial_other_belief_estimate(params, 2, ego_role=1).probs, [1 / 4, 1 / 4, 1 / 2, 0], atol=1e-6)
+    np.testing.assert_allclose(initial_other_belief_estimate(params, 0, ego_role=1).probs, [1 / 2, 1 / 4, 1 / 4, 0], atol=1e-6)
+
+    second_order = initial_second_order_ego_estimate(params, 1, ego_role=0)
+    np.testing.assert_allclose(second_order.probs, [3 / 8, 1 / 4, 3 / 8, 0], atol=1e-6)
+
+
 def test_impossible_observations_produce_nan():
     """An observation with zero likelihood under the belief must yield NaN, loudly.
 
@@ -241,9 +274,55 @@ def test_impossible_observations_produce_nan():
     )
     assert np.all(np.isnan(estimate.probs))
 
+    second_order = update_second_order_ego_estimate_with_observation_only(
+        params,
+        ego_belief=certain_of_0,
+        other_belief_estimate=certain_of_0,
+        second_order_ego_estimate=certain_of_0,
+        ego_observation=0,
+        ego_action=wait,
+        other_action_distribution=role_1_optimal_policy(certain_of_0),
+        ego_role=0,
+        ego_action_prior=UNIFORM_ACTIONS,
+        other_action_prior=UNIFORM_ACTIONS,
+    )
+    assert np.all(np.isnan(second_order.probs))
+
     # Symbol 3 is only emitted from the terminal state, which the prior excludes.
     assert np.all(np.isnan(initial_belief(params, 3, ego_role=0).probs))
     assert np.all(np.isnan(initial_other_belief_estimate(params, 3, ego_role=0).probs))
+    assert np.all(np.isnan(initial_second_order_ego_estimate(params, 3, ego_role=0).probs))
+
+
+def test_contradictory_estimates_produce_nan():
+    """A branch WE find possible but THEY find impossible must yield NaN, not be dropped.
+
+    Guessing game, ego = agent 0. We waited, saw symbol 1, and our belief is uniform over
+    the referents, so as far as we know the state is 0 (they saw 2) or 2 (they saw 0).
+    But our estimate of THEIR belief says they are certain the state is 2.
+
+    That is a contradiction: if the state is 0 -- which we find possible -- they saw 2,
+    which is impossible under a belief certain of state 2. Their posterior for that branch
+    is 0/0. Silently dropping it would leave a finite, healthy-looking estimate built from
+    the other branch alone. The estimates are inconsistent with each other, so the update
+    must return NaN instead.
+    """
+    params, _ = guessing_game_spec()
+    uniform_referent = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
+    certain_of_2 = distrax.Categorical(probs=jnp.array([0.0, 0.0, 1.0, 0.0]))
+    wait = int(params.num_actions) - 1
+
+    estimate = update_other_belief_estimate_with_observation_only(
+        params,
+        ego_belief=uniform_referent,  # we find state 0 possible
+        other_belief_estimate=certain_of_2,  # ...but think they are certain of state 2
+        ego_observation=1,
+        ego_action=wait,
+        other_action_distribution=role_1_optimal_policy(certain_of_2),
+        ego_role=0,
+        ego_action_prior=UNIFORM_ACTIONS,
+    )
+    assert np.all(np.isnan(estimate.probs))
 
 
 # --- Agreement with a brute-force reference ----------------------------------------
@@ -278,6 +357,8 @@ class RandomCase:
     ego_action: int
     other_action: int
     ego_action_prior: np.ndarray
+    second_order_ego_estimate: np.ndarray
+    other_action_prior: np.ndarray
     ego_role: int
     traced: bool
 
@@ -334,6 +415,9 @@ def _random_case(seed, ego_role, traced):
         ego_action=ego_action,
         other_action=other_action,
         ego_action_prior=_random_simplex(rng, A),
+        # Drawn last, so the earlier fields are unchanged by their addition.
+        second_order_ego_estimate=_random_simplex(rng, S),
+        other_action_prior=_random_simplex(rng, A),
         ego_role=ego_role,
         traced=traced,
     )
@@ -373,6 +457,74 @@ def _normalized(v):
 
 def _assert_close(got, want):
     np.testing.assert_allclose(np.asarray(got.probs), want, atol=1e-5)
+
+
+# The estimate updates, written as loops from the seat of agent `updater_role` (the
+# updater) about its partner. The second-order references call them from the OTHER
+# agent's seat, exactly as the second-order functions do.
+
+
+def _reference_branch_weights(c, updater_role, updater_belief, updater_observation, updater_action, partner_action_probs):
+    """w(a_partner, o_partner) ∝ π(a_partner) · ∑_{s'} pred(s') · O(o_updater, o_partner | s', a),
+    pred(s') = ∑_s T(s' | s, a) b_updater(s), with a = (a_updater, a_partner). Shape [A, O]."""
+    weights = np.zeros((A, O))
+    for partner_action in range(A):
+        joint_action = _agent_order(updater_role, updater_action, partner_action)
+        for partner_observation in range(O):
+            weights[partner_action, partner_observation] = partner_action_probs[partner_action] * sum(
+                _predicted_prob(c.T, updater_belief, joint_action, next_state)
+                * _joint_observation_prob(c.O_joint, next_state, joint_action, updater_role, updater_observation, partner_observation)
+                for next_state in range(S)
+            )
+    return weights
+
+
+def _reference_estimate_update(
+    c, updater_role, updater_belief, partner_belief_estimate, updater_observation, updater_action, partner_action_probs, updater_action_prior
+):
+    """Steps 1-5 of update_other_belief_estimate_with_observation_only, from `updater_role`'s seat:
+
+        b_{a,o}(s') ∝ ∑_h P(h) · [∑_s T(s' | s, h, a_partner) b̄(s)] · O_partner(o_partner | s', h, a_partner)
+        b̄'(s')      ∝ ∑_{a_partner, o_partner} w(a_partner, o_partner) · b_{a,o}(s')
+
+    where h ranges over the updater actions the partner thinks it might have taken.
+    """
+    partner_role = 1 - updater_role
+    weights = _reference_branch_weights(c, updater_role, updater_belief, updater_observation, updater_action, partner_action_probs)
+    mixture = np.zeros(S)
+    for partner_action in range(A):
+        for partner_observation in range(O):
+            # The partner's posterior, marginalizing the updater action h it never saw.
+            partner_posterior = np.zeros(S)
+            for h in range(A):
+                hypothetical_joint_action = _agent_order(updater_role, h, partner_action)
+                for next_state in range(S):
+                    partner_posterior[next_state] += (
+                        updater_action_prior[h]
+                        * _predicted_prob(c.T, partner_belief_estimate, hypothetical_joint_action, next_state)
+                        * _own_observation_prob(c.O_joint, next_state, hypothetical_joint_action, partner_role, partner_observation)
+                    )
+            mixture += weights[partner_action, partner_observation] * _normalized(partner_posterior)
+    return _normalized(mixture)
+
+
+def _reference_initial_estimate(c, updater_role, updater_observation):
+    """b̄_0(s) = ∑_{o_partner} w(o_partner) · b_{o_partner}(s), from `updater_role`'s seat, where
+    w(o_partner) ∝ ∑_s P0(s) · O(o_updater, o_partner | s, reset_action) and
+    b_{o_partner}(s) ∝ P0(s) · O_partner(o_partner | s, reset_action)."""
+    reset_action = (0, 0)
+    mixture = np.zeros(S)
+    for partner_observation in range(O):
+        weight = sum(
+            c.prior[state] * _joint_observation_prob(c.O_joint, state, reset_action, updater_role, updater_observation, partner_observation)
+            for state in range(S)
+        )
+        partner_posterior = np.array(
+            [c.prior[state] * _own_observation_prob(c.O_joint, state, reset_action, 1 - updater_role, partner_observation) for state in range(S)]
+        )
+        if weight > 0:
+            mixture += weight * _normalized(partner_posterior)
+    return _normalized(mixture)
 
 
 @pytest.mark.parametrize("seed, ego_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
@@ -446,21 +598,9 @@ def test_initial_other_belief_estimate_matches_reference(seed, ego_role, traced)
     w(o_other) ∝ ∑_s P0(s) · O(o_ego, o_other | s, reset_action) and
     b_{o_other}(s) ∝ P0(s) · O_other(o_other | s, reset_action)."""
     c = _random_case(seed, ego_role, traced)
-    reset_action = (0, 0)
-
-    want = np.zeros(S)
-    for other_observation in range(O):
-        weight = sum(
-            c.prior[state] * _joint_observation_prob(c.O_joint, state, reset_action, c.ego_role, c.ego_observation, other_observation)
-            for state in range(S)
-        )
-        their_posterior = np.array(
-            [c.prior[state] * _own_observation_prob(c.O_joint, state, reset_action, c.other_id, other_observation) for state in range(S)]
-        )
-        want += weight * _normalized(their_posterior)
-
+    want = _reference_initial_estimate(c, c.ego_role, c.ego_observation)
     got = c.run(lambda ego_role: initial_other_belief_estimate(c.env_params, c.ego_observation, ego_role=ego_role))
-    _assert_close(got, _normalized(want))
+    _assert_close(got, want)
 
 
 @pytest.mark.parametrize("seed, ego_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
@@ -478,28 +618,9 @@ def test_update_other_belief_estimate_matches_reference(seed, ego_role, traced):
     c = _random_case(seed, ego_role, traced)
     ego_action_prior = c.ego_action_prior  # P(h), a random distribution
     other_action_probs = c.policy_probs(c.other_belief_estimate)  # π(a_other), passed in as given
-
-    want = np.zeros(S)
-    for other_action in range(A):
-        actual_joint_action = _agent_order(c.ego_role, c.ego_action, other_action)
-        for other_observation in range(O):
-            # OUR side: how well (a_other, o_other) explains what we saw, under our real action.
-            weight = other_action_probs[other_action] * sum(
-                _predicted_prob(c.T, c.ego_belief, actual_joint_action, next_state)
-                * _joint_observation_prob(c.O_joint, next_state, actual_joint_action, c.ego_role, c.ego_observation, other_observation)
-                for next_state in range(S)
-            )
-            # THEIR side: their posterior, marginalizing the ego action h they never saw.
-            their_posterior = np.zeros(S)
-            for h in range(A):
-                hypothetical_joint_action = _agent_order(c.ego_role, h, other_action)
-                for next_state in range(S):
-                    their_posterior[next_state] += (
-                        ego_action_prior[h]
-                        * _predicted_prob(c.T, c.other_belief_estimate, hypothetical_joint_action, next_state)
-                        * _own_observation_prob(c.O_joint, next_state, hypothetical_joint_action, c.other_id, other_observation)
-                    )
-            want += weight * _normalized(their_posterior)
+    want = _reference_estimate_update(
+        c, c.ego_role, c.ego_belief, c.other_belief_estimate, c.ego_observation, c.ego_action, other_action_probs, ego_action_prior
+    )
 
     got = c.run(
         lambda ego_role: update_other_belief_estimate_with_observation_only(
@@ -511,6 +632,70 @@ def test_update_other_belief_estimate_matches_reference(seed, ego_role, traced):
             other_action_distribution=distrax.Categorical(probs=jnp.array(other_action_probs)),
             ego_role=ego_role,
             ego_action_prior=distrax.Categorical(probs=jnp.array(ego_action_prior)),
+        )
+    )
+    _assert_close(got, want)
+
+
+@pytest.mark.parametrize("seed, ego_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_initial_second_order_ego_estimate_matches_reference(seed, ego_role, traced):
+    """b̿_0(s) = ∑_{o_other} w(o_other) · [their initial estimate of us, given o_other](s),
+    w(o_other) ∝ ∑_s P0(s) · O(o_ego, o_other | s, reset_action)."""
+    c = _random_case(seed, ego_role, traced)
+    reset_action = (0, 0)
+
+    want = np.zeros(S)
+    for other_observation in range(O):
+        weight = sum(
+            c.prior[state] * _joint_observation_prob(c.O_joint, state, reset_action, c.ego_role, c.ego_observation, other_observation)
+            for state in range(S)
+        )
+        want += weight * _reference_initial_estimate(c, c.other_id, other_observation)
+
+    got = c.run(lambda ego_role: initial_second_order_ego_estimate(c.env_params, c.ego_observation, ego_role=ego_role))
+    _assert_close(got, _normalized(want))
+
+
+@pytest.mark.parametrize("seed, ego_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_update_second_order_ego_estimate_matches_reference(seed, ego_role, traced):
+    """b̿_e'(s) ∝ ∑_{a_other, o_other} w(a_other, o_other) · U(a_other, o_other)(s), where w is
+    the first-order branch weight (OUR side) and U is the first-order estimate update run
+    from THEIR seat: their belief b̄_o, their estimate of us b̿_e, their observation and
+    action (a_other, o_other), our action as they predict it, and their action as they
+    think we predict it."""
+    c = _random_case(seed, ego_role, traced)
+    other_action_probs = c.policy_probs(c.other_belief_estimate)  # their action, as we predict it
+    ego_action_prior = c.ego_action_prior  # our action, as they predict it
+    other_action_prior = c.other_action_prior  # their action, as they think we predict it
+
+    weights = _reference_branch_weights(c, c.ego_role, c.ego_belief, c.ego_observation, c.ego_action, other_action_probs)
+    want = np.zeros(S)
+    for other_action in range(A):
+        for other_observation in range(O):
+            their_estimate_of_us = _reference_estimate_update(
+                c,
+                c.other_id,
+                c.other_belief_estimate,
+                c.second_order_ego_estimate,
+                other_observation,
+                other_action,
+                ego_action_prior,
+                other_action_prior,
+            )
+            want += weights[other_action, other_observation] * their_estimate_of_us
+
+    got = c.run(
+        lambda ego_role: update_second_order_ego_estimate_with_observation_only(
+            c.env_params,
+            ego_belief=distrax.Categorical(probs=jnp.array(c.ego_belief)),
+            other_belief_estimate=distrax.Categorical(probs=jnp.array(c.other_belief_estimate)),
+            second_order_ego_estimate=distrax.Categorical(probs=jnp.array(c.second_order_ego_estimate)),
+            ego_observation=c.ego_observation,
+            ego_action=c.ego_action,
+            other_action_distribution=distrax.Categorical(probs=jnp.array(other_action_probs)),
+            ego_role=ego_role,
+            ego_action_prior=distrax.Categorical(probs=jnp.array(ego_action_prior)),
+            other_action_prior=distrax.Categorical(probs=jnp.array(other_action_prior)),
         )
     )
     _assert_close(got, _normalized(want))

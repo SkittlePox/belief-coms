@@ -26,7 +26,7 @@ through or delete them as they're resolved.
 
 ## Headline
 
-- Tests pass (111 as of 2026-11-16: 101 belief-function, 7 stacked env, 3 GAE).
+- Tests pass (129 as of 2026-11-16: 119 belief-function, 7 stacked env, 3 GAE).
 - Training **runs end to end but does not train**:
   - the belief population's losses are NaN from the first iteration (B1);
   - env beliefs go NaN within a few acts at initialization, so from the second iteration
@@ -36,8 +36,8 @@ through or delete them as they're resolved.
 
   Nothing in the test suite covers the agents, the rollout or the PPO update, and the
   GAE tests use no NaN rewards. That is why none of this was caught.
-- The belief machinery has one estimate slot per agent; there is no second-order estimate
-  (G1, G2).
+- The belief machinery has one estimate slot per agent. Second-order estimate functions
+  exist but are not wired into the env (G1, G2).
 - No wandb logging (G5). The only environment is the guessing game, which is a weak test
   of communication (D4).
 
@@ -201,7 +201,7 @@ Fixing it is a decision, not a patch:
 
 **G1. No second-order estimate in the env.** State holds `true_agent_belief_states` and one
 `estimated_agent_belief_states` per agent. There is no slot for "what my partner thinks I
-believe" (or deeper). See D1 for what it would feed and G2 for how to compute it.
+believe" (or deeper). See D1 for what it would feed; G2 has the functions that compute it.
 
 **G3. Communication never moves the estimates.**
 - The speaker's post-utterance estimate of the listener is a passthrough in the rollout
@@ -297,10 +297,13 @@ Claude refactored [belief_representations.py](../src/tools/belief_representation
 - **No fallbacks anywhere (since `f05287b`).** `_normalize` is gone; every function ends in
   a plain `unnormalized / unnormalized.sum()`, so all five return all-NaN when the evidence
   is impossible under the model. The module docstring's "Impossible observations" section
-  states the policy. The only remaining `mass > 0` guards are on per-hypothesis
-  posteriors inside the two estimate functions. Those are required for correctness (the
-  zero-mass hypotheses also carry zero weight) and are commented as "not a fallback". See
-  B5 for what the stricter policy surfaced in the env.
+  states the policy. The estimate functions mix per-hypothesis branches. Their only
+  guard zeroes branches with zero OUR-side weight, so 0 · NaN can't poison a healthy
+  estimate; it is commented as "not a fallback". Since 2026-11-16 the guard is on weight,
+  not on the partner-side posterior mass. A branch we find possible but they find
+  impossible means the estimates contradict each other, and it now yields NaN
+  (`test_contradictory_estimates_produce_nan`). See B5 for what the stricter policy
+  surfaced in the env.
 - **Renames (`530f933`).** `params` → `env_params`, `agent_id` → `agent_role` (since renamed `ego_role`, 2026-11-16) (all call
   sites updated: the stacked env, `returns.py`, `guessing_game.__main__`).
   `update_with_observation_and_joint_action` now carries a NOTE that the model never uses
@@ -310,18 +313,24 @@ Claude refactored [belief_representations.py](../src/tools/belief_representation
   `tools/returns.py` (`ExactReturnEvaluator` takes `params` directly and gathers
   transition/observation/reward itself), and `guessing_game.__main__`.
 - **Tests:** [test_belief_representations.py](../tests/test_belief_representations.py)
-  has 101 tests: worked examples, `test_impossible_observations_produce_nan`, and a
+  has 119 tests: worked examples, `test_impossible_observations_produce_nan`, and a
   `*_matches_reference` test per function against brute-force references. These are
   parametrized over seed, `ego_role` and traced vs concrete inputs, and the estimate
   update also with a random `ego_action_prior`.
 
 What's left over from it is in T9.
 
-**G2. No second-order estimate.** `ego_action_prior` (what the other agent assumes about
-the ego's action) defaults to uniform, and nothing supplies a principled value. The
-memo-based `nested_belief.py` was deleted on 2026-11-16 (memo is not to be used). If one is
-needed, write it by hand in JAX: e.g. the first-order estimate update applied recursively,
-with level `k+1` supplying level `k`'s `ego_action_prior`, stored as `[num_agents, K+1, S]`.
+**G2. Second-order estimate: functions done, not wired in.** (2026-11-16) The memo-based
+`nested_belief.py` was deleted (memo is not to be used) and replaced by hand-written JAX in
+`belief_representations`: `initial_second_order_ego_estimate` and
+`update_second_order_ego_estimate_with_observation_only`, which updates b̿_e (our estimate of
+their estimate of our belief). It reuses the first-order branch weights
+(`_branch_weights`) and, in each branch, runs the first-order estimate update from the
+other agent's seat. The first-order update's `ego_action_prior` should then be our policy
+applied to b̿_e. The second-order update needs a third-order `other_action_prior` (their
+action, as they think we predict it), which callers pass as uniform for now. Not yet done:
+a third `[num_agents, S]` slot in the env state, seeding it at reset, and switching the
+env's uniform `ego_action_prior` to `ego_policy(b̿_e)`.
 
 **T9. `belief_representations` leftovers** (after the refactor above).
 - `if ego_belief is None: raise` is near-dead now that `ego_belief` is keyword-only with no
