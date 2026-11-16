@@ -72,7 +72,7 @@ def test_update_with_observation_only_worked_example():
         ego_observation=1,  # agent 1 saw symbol 1
         ego_action_tminus1=wait,  # agent 1 waited
         other_policy=role_0_optimal_policy,  # how agent 1 thinks agent 0 acts
-        agent_id=1,
+        agent_role=1,
     )
 
     np.testing.assert_allclose(updated.probs, [0.5, 0.0, 0.5, 0.0], atol=1e-6)
@@ -112,12 +112,12 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
 
     estimate = update_other_belief_estimate_with_observation_only(
         params,
-        ego_belief=initial_belief(params, 0, agent_id=0),  # the ego's OWN belief
+        ego_belief=initial_belief(params, 0, agent_role=0),  # the ego's OWN belief
         other_belief_estimate=uniform_referent,  # ego's prior estimate of agent 1
         ego_observation=0,  # agent 0 saw referent symbol 0
         ego_action=0,  # agent 0 pressed button 0
         other_policy=role_1_optimal_policy,  # agent 1's policy
-        agent_id=0,
+        agent_role=0,
     )
 
     # Reference: agent 1's ACTUAL belief had it seen symbol 1 (the observation it in fact
@@ -130,7 +130,7 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
         ego_observation=1,  # agent 1 saw symbol 1
         ego_action_tminus1=3,  # agent 1's own action (wait)
         other_policy=role_0_optimal_policy,  # agent 0's policy, marginalized over by agent 1
-        agent_id=1,
+        agent_role=1,
     )
 
     # Agent 1 genuinely believes state 0 is possible (sanity-check the reference).
@@ -159,7 +159,7 @@ def test_ego_belief_is_mandatory():
     """
     params, policies = guessing_game_spec()
     uniform_referent = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
-    rest = dict(ego_observation=0, ego_action=0, other_policy=policies[1], agent_id=0)
+    rest = dict(ego_observation=0, ego_action=0, other_policy=policies[1], agent_role=0)
 
     with pytest.raises(TypeError):  # missing keyword-only argument
         update_other_belief_estimate_with_observation_only(params, other_belief_estimate=uniform_referent, **rest)
@@ -180,7 +180,7 @@ def test_the_reset_observation_beats_the_prior():
     params, _ = guessing_game_spec()
 
     blind = np.asarray(params.initial_state_distribution)  # the best you can do UNOBSERVED
-    looking = np.asarray(initial_other_belief_estimate(params, jnp.array(1), agent_id=0).probs)
+    looking = np.asarray(initial_other_belief_estimate(params, jnp.array(1), agent_role=0).probs)
 
     np.testing.assert_allclose(blind, [1 / 3, 1 / 3, 1 / 3, 0.0], atol=1e-5)
     # The ego saw symbol 1 and ruled out state 1 for ITSELF. The two agents always see
@@ -204,7 +204,7 @@ def test_impossible_observations_produce_nan():
     certain_of_0 = distrax.Categorical(probs=jnp.array([1.0, 0.0, 0.0, 0.0]))
     wait = int(params.num_actions) - 1
 
-    updated = update_with_observation_and_joint_action(params, certain_of_0, 0, (wait, wait), agent_id=0)
+    updated = update_with_observation_and_joint_action(params, certain_of_0, 0, (wait, wait), agent_role=0)
     assert np.all(np.isnan(updated.probs))
 
     updated = update_with_observation_only(
@@ -214,7 +214,7 @@ def test_impossible_observations_produce_nan():
         ego_observation=0,
         ego_action_tminus1=wait,
         other_policy=role_1_optimal_policy,
-        agent_id=0,
+        agent_role=0,
     )
     assert np.all(np.isnan(updated.probs))
 
@@ -225,13 +225,13 @@ def test_impossible_observations_produce_nan():
         ego_observation=0,
         ego_action=wait,
         other_policy=role_1_optimal_policy,
-        agent_id=0,
+        agent_role=0,
     )
     assert np.all(np.isnan(estimate.probs))
 
     # Symbol 3 is only emitted from the terminal state, which the prior excludes.
-    assert np.all(np.isnan(initial_belief(params, 3, agent_id=0).probs))
-    assert np.all(np.isnan(initial_other_belief_estimate(params, 3, agent_id=0).probs))
+    assert np.all(np.isnan(initial_belief(params, 3, agent_role=0).probs))
+    assert np.all(np.isnan(initial_other_belief_estimate(params, 3, agent_role=0).probs))
 
 
 # --- Agreement with a brute-force reference ----------------------------------------
@@ -243,13 +243,13 @@ def test_impossible_observations_produce_nan():
 # observation model, so mixing up the two agents (or their observation axes) cannot
 # cancel out by symmetry.
 #
-# Every test runs on the same 16 random cases: 4 seeds x ego agent 0 or 1 x agent_id
+# Every test runs on the same 16 random cases: 4 seeds x ego agent 0 or 1 x agent_role
 # passed as a plain int ("static") or as a traced value under jax.jit ("traced").
 
 S, A, O = 4, 3, 3  # states, actions, observations
 
 RANDOM_CASES = list(itertools.product(range(4), [0, 1], [False, True]))
-RANDOM_CASE_IDS = [f"seed{seed}-agent{agent_id}-{'traced' if traced else 'static'}" for seed, agent_id, traced in RANDOM_CASES]
+RANDOM_CASE_IDS = [f"seed{seed}-agent{agent_role}-{'traced' if traced else 'static'}" for seed, agent_role, traced in RANDOM_CASES]
 
 
 @dataclasses.dataclass
@@ -266,18 +266,18 @@ class RandomCase:
     ego_action: int
     other_action: int
     ego_action_prior: np.ndarray
-    agent_id: int
+    agent_role: int
     traced: bool
 
     @property
     def other_id(self):
-        return 1 - self.agent_id
+        return 1 - self.agent_role
 
     def run(self, belief_function):
-        """Call belief_function(agent_id) -- under jax.jit with a traced agent_id if traced."""
+        """Call belief_function(agent_role) -- under jax.jit with a traced agent_role if traced."""
         if self.traced:
-            return jax.jit(belief_function)(jnp.array(self.agent_id))
-        return belief_function(self.agent_id)
+            return jax.jit(belief_function)(jnp.array(self.agent_role))
+        return belief_function(self.agent_role)
 
 
 def _random_simplex(rng, *shape):
@@ -285,7 +285,7 @@ def _random_simplex(rng, *shape):
     return x / x.sum(-1, keepdims=True)
 
 
-def _random_case(seed, agent_id, traced):
+def _random_case(seed, agent_role, traced):
     rng = np.random.default_rng(seed)
     T = _random_simplex(rng, S, A, A, S)
     O_joint = _random_simplex(rng, S, A, A, O * O).reshape(S, A, A, O, O)
@@ -322,7 +322,7 @@ def _random_case(seed, agent_id, traced):
         ego_action=ego_action,
         other_action=other_action,
         ego_action_prior=_random_simplex(rng, A),
-        agent_id=agent_id,
+        agent_role=agent_role,
         traced=traced,
     )
 
@@ -330,9 +330,9 @@ def _random_case(seed, agent_id, traced):
 # Reference helpers. All take actions as an (agent 0, agent 1) tuple, like the env.
 
 
-def _agent_order(agent_id, ego_action, other_action):
+def _agent_order(agent_role, ego_action, other_action):
     """The (agent 0, agent 1) joint action, given the ego's and the other's actions."""
-    return (ego_action, other_action) if agent_id == 0 else (other_action, ego_action)
+    return (ego_action, other_action) if agent_role == 0 else (other_action, ego_action)
 
 
 def _predicted_prob(T, belief, joint_action, next_state):
@@ -341,18 +341,18 @@ def _predicted_prob(T, belief, joint_action, next_state):
     return sum(T[s, a0, a1, next_state] * belief[s] for s in range(S))
 
 
-def _own_observation_prob(O_joint, next_state, joint_action, agent_id, observation):
-    """O_i(o_i | s', a): agent `agent_id`'s observation, the other agent's summed out."""
+def _own_observation_prob(O_joint, next_state, joint_action, agent_role, observation):
+    """O_i(o_i | s', a): agent `agent_role`'s observation, the other agent's summed out."""
     a0, a1 = joint_action
     grid = O_joint[next_state, a0, a1]  # [o0, o1]
-    return grid[observation, :].sum() if agent_id == 0 else grid[:, observation].sum()
+    return grid[observation, :].sum() if agent_role == 0 else grid[:, observation].sum()
 
 
-def _joint_observation_prob(O_joint, next_state, joint_action, agent_id, ego_observation, other_observation):
+def _joint_observation_prob(O_joint, next_state, joint_action, agent_role, ego_observation, other_observation):
     """O(o_ego, o_other | s', a), with the observations given in ego/other order."""
     a0, a1 = joint_action
     grid = O_joint[next_state, a0, a1]  # [o0, o1]
-    return grid[ego_observation, other_observation] if agent_id == 0 else grid[other_observation, ego_observation]
+    return grid[ego_observation, other_observation] if agent_role == 0 else grid[other_observation, ego_observation]
 
 
 def _normalized(v):
@@ -363,83 +363,83 @@ def _assert_close(got, want):
     np.testing.assert_allclose(np.asarray(got.probs), want, atol=1e-5)
 
 
-@pytest.mark.parametrize("seed, agent_id, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
-def test_update_with_observation_and_joint_action_matches_reference(seed, agent_id, traced):
+@pytest.mark.parametrize("seed, agent_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_update_with_observation_and_joint_action_matches_reference(seed, agent_role, traced):
     """b'(s') ∝ O_ego(o | s', a) · ∑_s T(s' | s, a) b(s)"""
-    c = _random_case(seed, agent_id, traced)
-    joint_action = _agent_order(c.agent_id, c.ego_action, c.other_action)
+    c = _random_case(seed, agent_role, traced)
+    joint_action = _agent_order(c.agent_role, c.ego_action, c.other_action)
 
     want = np.zeros(S)
     for next_state in range(S):
-        want[next_state] = _own_observation_prob(c.O_joint, next_state, joint_action, c.agent_id, c.ego_observation) * _predicted_prob(
+        want[next_state] = _own_observation_prob(c.O_joint, next_state, joint_action, c.agent_role, c.ego_observation) * _predicted_prob(
             c.T, c.ego_belief, joint_action, next_state
         )
 
     got = c.run(
-        lambda agent_id: update_with_observation_and_joint_action(
-            c.env_params, distrax.Categorical(probs=jnp.array(c.ego_belief)), c.ego_observation, joint_action, agent_id=agent_id
+        lambda agent_role: update_with_observation_and_joint_action(
+            c.env_params, distrax.Categorical(probs=jnp.array(c.ego_belief)), c.ego_observation, joint_action, agent_role=agent_role
         )
     )
     _assert_close(got, _normalized(want))
 
 
-@pytest.mark.parametrize("seed, agent_id, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
-def test_update_with_observation_only_matches_reference(seed, agent_id, traced):
+@pytest.mark.parametrize("seed, agent_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_update_with_observation_only_matches_reference(seed, agent_role, traced):
     """b'(s') ∝ ∑_{a_other} π*(b̄)(a_other) · O_ego(o | s', a) · ∑_s T(s' | s, a) b(s),
     with a = (ego_action, a_other)."""
-    c = _random_case(seed, agent_id, traced)
+    c = _random_case(seed, agent_role, traced)
     other_action_probs = c.policy_probs(c.other_belief_estimate)  # π*(b̄)
 
     want = np.zeros(S)
     for other_action in range(A):
-        joint_action = _agent_order(c.agent_id, c.ego_action, other_action)
+        joint_action = _agent_order(c.agent_role, c.ego_action, other_action)
         for next_state in range(S):
             want[next_state] += (
                 other_action_probs[other_action]
-                * _own_observation_prob(c.O_joint, next_state, joint_action, c.agent_id, c.ego_observation)
+                * _own_observation_prob(c.O_joint, next_state, joint_action, c.agent_role, c.ego_observation)
                 * _predicted_prob(c.T, c.ego_belief, joint_action, next_state)
             )
 
     got = c.run(
-        lambda agent_id: update_with_observation_only(
+        lambda agent_role: update_with_observation_only(
             c.env_params,
             ego_belief=distrax.Categorical(probs=jnp.array(c.ego_belief)),
             other_belief_estimate=distrax.Categorical(probs=jnp.array(c.other_belief_estimate)),
             ego_observation=c.ego_observation,
             ego_action_tminus1=c.ego_action,
             other_policy=c.policy,
-            agent_id=agent_id,
+            agent_role=agent_role,
         )
     )
     _assert_close(got, _normalized(want))
 
 
-@pytest.mark.parametrize("seed, agent_id, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
-def test_initial_belief_matches_reference(seed, agent_id, traced):
+@pytest.mark.parametrize("seed, agent_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_initial_belief_matches_reference(seed, agent_role, traced):
     """b_0(s) ∝ P0(s) · O_ego(o_0 | s, reset_action), with reset_action = (0, 0)."""
-    c = _random_case(seed, agent_id, traced)
+    c = _random_case(seed, agent_role, traced)
     reset_action = (0, 0)
 
     want = np.zeros(S)
     for state in range(S):
-        want[state] = c.prior[state] * _own_observation_prob(c.O_joint, state, reset_action, c.agent_id, c.ego_observation)
+        want[state] = c.prior[state] * _own_observation_prob(c.O_joint, state, reset_action, c.agent_role, c.ego_observation)
 
-    got = c.run(lambda agent_id: initial_belief(c.env_params, c.ego_observation, agent_id=agent_id))
+    got = c.run(lambda agent_role: initial_belief(c.env_params, c.ego_observation, agent_role=agent_role))
     _assert_close(got, _normalized(want))
 
 
-@pytest.mark.parametrize("seed, agent_id, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
-def test_initial_other_belief_estimate_matches_reference(seed, agent_id, traced):
+@pytest.mark.parametrize("seed, agent_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_initial_other_belief_estimate_matches_reference(seed, agent_role, traced):
     """b̄_0(s) = ∑_{o_other} w(o_other) · b_{o_other}(s), where
     w(o_other) ∝ ∑_s P0(s) · O(o_ego, o_other | s, reset_action) and
     b_{o_other}(s) ∝ P0(s) · O_other(o_other | s, reset_action)."""
-    c = _random_case(seed, agent_id, traced)
+    c = _random_case(seed, agent_role, traced)
     reset_action = (0, 0)
 
     want = np.zeros(S)
     for other_observation in range(O):
         weight = sum(
-            c.prior[state] * _joint_observation_prob(c.O_joint, state, reset_action, c.agent_id, c.ego_observation, other_observation)
+            c.prior[state] * _joint_observation_prob(c.O_joint, state, reset_action, c.agent_role, c.ego_observation, other_observation)
             for state in range(S)
         )
         their_posterior = np.array(
@@ -447,14 +447,14 @@ def test_initial_other_belief_estimate_matches_reference(seed, agent_id, traced)
         )
         want += weight * _normalized(their_posterior)
 
-    got = c.run(lambda agent_id: initial_other_belief_estimate(c.env_params, c.ego_observation, agent_id=agent_id))
+    got = c.run(lambda agent_role: initial_other_belief_estimate(c.env_params, c.ego_observation, agent_role=agent_role))
     _assert_close(got, _normalized(want))
 
 
 @pytest.mark.parametrize("mode", ["mixture", "soft_evidence"])
 @pytest.mark.parametrize("uniform_ego_action_prior", [True, False], ids=["uniform_prior", "random_prior"])
-@pytest.mark.parametrize("seed, agent_id, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
-def test_update_other_belief_estimate_matches_reference(seed, agent_id, traced, uniform_ego_action_prior, mode):
+@pytest.mark.parametrize("seed, agent_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
+def test_update_other_belief_estimate_matches_reference(seed, agent_role, traced, uniform_ego_action_prior, mode):
     """Steps 1-5 of the docstring:
 
         w(a_other, o_other) ∝ π*(b̄)(a_other) · ∑_{s'} pred_ego(s') · O(o_ego, o_other | s', a)
@@ -465,24 +465,24 @@ def test_update_other_belief_estimate_matches_reference(seed, agent_id, traced, 
     ego actions the other agent thinks we might have taken. "mixture" normalizes each
     b_{a,o} before mixing; "soft_evidence" mixes them unnormalized.
     """
-    c = _random_case(seed, agent_id, traced)
+    c = _random_case(seed, agent_role, traced)
     ego_action_prior = np.ones(A) / A if uniform_ego_action_prior else c.ego_action_prior  # P(h)
     other_action_probs = c.policy_probs(c.other_belief_estimate)  # π*(b̄)
 
     want = np.zeros(S)
     for other_action in range(A):
-        actual_joint_action = _agent_order(c.agent_id, c.ego_action, other_action)
+        actual_joint_action = _agent_order(c.agent_role, c.ego_action, other_action)
         for other_observation in range(O):
             # OUR side: how well (a_other, o_other) explains what we saw, under our real action.
             weight = other_action_probs[other_action] * sum(
                 _predicted_prob(c.T, c.ego_belief, actual_joint_action, next_state)
-                * _joint_observation_prob(c.O_joint, next_state, actual_joint_action, c.agent_id, c.ego_observation, other_observation)
+                * _joint_observation_prob(c.O_joint, next_state, actual_joint_action, c.agent_role, c.ego_observation, other_observation)
                 for next_state in range(S)
             )
             # THEIR side: their posterior, marginalizing the ego action h they never saw.
             their_posterior = np.zeros(S)
             for h in range(A):
-                hypothetical_joint_action = _agent_order(c.agent_id, h, other_action)
+                hypothetical_joint_action = _agent_order(c.agent_role, h, other_action)
                 for next_state in range(S):
                     their_posterior[next_state] += (
                         ego_action_prior[h]
@@ -494,14 +494,14 @@ def test_update_other_belief_estimate_matches_reference(seed, agent_id, traced, 
             want += weight * their_posterior
 
     got = c.run(
-        lambda agent_id: update_other_belief_estimate_with_observation_only(
+        lambda agent_role: update_other_belief_estimate_with_observation_only(
             c.env_params,
             ego_belief=distrax.Categorical(probs=jnp.array(c.ego_belief)),
             other_belief_estimate=distrax.Categorical(probs=jnp.array(c.other_belief_estimate)),
             ego_observation=c.ego_observation,
             ego_action=c.ego_action,
             other_policy=c.policy,
-            agent_id=agent_id,
+            agent_role=agent_role,
             ego_action_prior=None if uniform_ego_action_prior else jnp.array(ego_action_prior),
             mode=mode,
         )

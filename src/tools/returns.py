@@ -91,8 +91,8 @@ class ExactReturnEvaluator:
                 future = jnp.zeros(())
                 for ego_obs in range(self.num_observations):
                     for other_obs in range(self.num_observations):
-                        new_ego_belief = update_with_observation_and_joint_action(params, ego_belief, ego_obs, joint_action, agent_id=ego_agent_id)
-                        new_other_belief = update_with_observation_and_joint_action(params, other_belief, other_obs, joint_action, agent_id=other_agent_id)
+                        new_ego_belief = update_with_observation_and_joint_action(params, ego_belief, ego_obs, joint_action, agent_role=ego_agent_id)
+                        new_other_belief = update_with_observation_and_joint_action(params, other_belief, other_obs, joint_action, agent_role=other_agent_id)
                         obs_0, obs_1 = (ego_obs, other_obs) if ego_agent_id == 0 else (other_obs, ego_obs)
 
                         def per_next_state(
@@ -231,8 +231,8 @@ def monte_carlo_returns(
             return_0 = return_0 + discount * r0 * active
             return_1 = return_1 + discount * r1 * active
 
-            b0 = update_with_observation_and_joint_action(params, b0, next_o0, joint_action, agent_id=0)
-            b1 = update_with_observation_and_joint_action(params, b1, next_o1, joint_action, agent_id=1)
+            b0 = update_with_observation_and_joint_action(params, b0, next_o0, joint_action, agent_role=0)
+            b1 = update_with_observation_and_joint_action(params, b1, next_o1, joint_action, agent_role=1)
 
             done_after = jnp.maximum(done_before, done.astype(jnp.float32))
             carry = (next_state, b0, b1, return_0, return_1, discount * discount_factor, done_after)

@@ -206,7 +206,7 @@ class StackedSignificationDecPOMDP:
 
         Conditioned on the agent's environment (``game_type``, by gathering that game
         type's params out of the stacked params -- the belief functions accept traced
-        params) and its ``role`` (passed as the traced ``agent_id``). The other
+        params) and its ``role`` (passed as the traced ``agent_role``). The other
         agent's action is unobserved, so both updates marginalize over it via the
         other role's optimal policy. Assumes dyadic games (other role = 1 - role).
 
@@ -225,7 +225,7 @@ class StackedSignificationDecPOMDP:
             ego_observation=observation,
             ego_action_tminus1=action,
             other_policy=other_policy,
-            agent_id=role,
+            agent_role=role,
         )
         new_estimate = update_other_belief_estimate_with_observation_only(
             game_params,
@@ -234,7 +234,7 @@ class StackedSignificationDecPOMDP:
             ego_observation=observation,
             ego_action=action,
             other_policy=other_policy,
-            agent_id=role,
+            agent_role=role,
         )
         return new_true.probs, new_estimate.probs
 
