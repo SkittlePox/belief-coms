@@ -70,15 +70,14 @@ def test_belief_stage_records_listeners_estimates_of_speakers():
     about_listeners, about_speakers, listeners_second_order = skewed(0), skewed(1), skewed(2)
     base = h.actions(state)
     actions = base._replace(
-        estimates=about_listeners,
-        other_belief_estimate_actions=about_speakers,
-        second_order_ego_estimate_actions=listeners_second_order,
+        speaker_other_belief_estimate_actions=about_listeners,
+        listener_other_belief_estimate_actions=about_speakers,
+        listener_second_order_ego_estimate_actions=listeners_second_order,
     )
 
     after_utt, *_ = h.step(jax.random.key(1), state, actions)
     np.testing.assert_array_equal(after_utt.estimated_agent_belief_states[listeners], about_listeners[listeners])
     np.testing.assert_array_equal(after_utt.estimated_agent_belief_states[speakers], state.estimated_agent_belief_states[speakers])
-    np.testing.assert_array_equal(after_utt.second_order_agent_belief_estimates, state.second_order_agent_belief_estimates)
 
     after_belief, _, _, _, post_comm_estimated = h.step(jax.random.key(2), after_utt, actions)
     expected = np.where(speakers[:, None], about_speakers, about_listeners)
@@ -86,21 +85,32 @@ def test_belief_stage_records_listeners_estimates_of_speakers():
     assert int(after_belief.game_counters.underlying_env_timestep) == 1, "the belief stage acted"
 
 
-def test_belief_stage_records_listeners_second_order_estimates():
-    """b̿_e is stored by holder, so the belief stage writes the LISTENERS' rows and leaves
-    the speakers'. Checked under a_to_b_thrice, whose first belief stage does not act (an
-    act would move every b̿_e row through the observation update)."""
+def test_stages_record_second_order_estimates_by_holder():
+    """b̿_e is stored by holder: the utterance stage writes the SPEAKERS' rows (and leaves
+    every true belief alone), the belief stage the LISTENERS' rows. Checked under
+    a_to_b_thrice, whose first belief stage does not act (an act would move every b̿_e row
+    through the observation update)."""
     h = Harness.build(scheme="a_to_b_thrice")
     state, _ = h.reset(seed=0)
     listeners = np.asarray(state.game_roles.agent_role_assignment) == 1  # a_to_b: role 0 speaks
-    new_second_order = state.true_agent_belief_states.at[:, 2].add(0.5)
-    new_second_order = new_second_order / new_second_order.sum(axis=-1, keepdims=True)
+    speakers = ~listeners
 
-    after_utt, *_ = h.step(jax.random.key(1), state)
-    actions = h.actions(after_utt)._replace(second_order_ego_estimate_actions=new_second_order)
+    def skewed(at):
+        est = state.true_agent_belief_states.at[:, at].add(0.5)
+        return est / est.sum(axis=-1, keepdims=True)
+
+    speakers_second_order, listeners_second_order = skewed(1), skewed(2)
+
+    actions = h.actions(state)._replace(speaker_second_order_ego_estimate_actions=speakers_second_order)
+    after_utt, *_ = h.step(jax.random.key(1), state, actions)
+    np.testing.assert_array_equal(after_utt.second_order_agent_belief_estimates[speakers], speakers_second_order[speakers])
+    np.testing.assert_array_equal(
+        after_utt.second_order_agent_belief_estimates[listeners], state.second_order_agent_belief_estimates[listeners]
+    )
+    np.testing.assert_array_equal(after_utt.true_agent_belief_states, state.true_agent_belief_states)
+
+    actions = h.actions(after_utt)._replace(listener_second_order_ego_estimate_actions=listeners_second_order)
     after_belief, *_ = h.step(jax.random.key(2), after_utt, actions)
     assert int(after_belief.game_counters.underlying_env_timestep) == 0, "no act on the first round"
-    np.testing.assert_array_equal(after_belief.second_order_agent_belief_estimates[listeners], new_second_order[listeners])
-    np.testing.assert_array_equal(
-        after_belief.second_order_agent_belief_estimates[~listeners], state.second_order_agent_belief_estimates[~listeners]
-    )
+    np.testing.assert_array_equal(after_belief.second_order_agent_belief_estimates[listeners], listeners_second_order[listeners])
+    np.testing.assert_array_equal(after_belief.second_order_agent_belief_estimates[speakers], speakers_second_order[speakers])

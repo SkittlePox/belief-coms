@@ -62,8 +62,10 @@ BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 # (b_e, b̄_o), and predicts its partner's unobserved action from its estimates of the
 # partner's inputs, (b̄_o, b̿_e) -- which is why the env tracks b̿_e.
 #
-# belief_estimate_post_utterance (step_env input) is also subject-indexed: row i is the
-# refreshed estimate ABOUT agent i after i's partner (the speaker) has uttered.
+# step_env's estimate inputs use the same conventions as the state they overwrite:
+# *_other_belief_estimate_actions are subject-indexed (row i = the new estimate ABOUT agent
+# i, written by i's partner), *_second_order_ego_estimate_actions are by holder (row i =
+# agent i's new b̿_e). See step_env for which rows each stage reads.
 
 @struct.dataclass
 class DialogState:
@@ -463,10 +465,11 @@ class StackedSignificationDecPOMDP:
         key: chex.PRNGKey,
         state: StackedSignificationState,
         utterance_actions: chex.Array,
-        belief_estimate_post_utterance: chex.Array,
-        ego_belief_actions: chex.Array,
-        other_belief_estimate_actions: chex.Array,
-        second_order_ego_estimate_actions: chex.Array,
+        speaker_other_belief_estimate_actions: chex.Array,
+        speaker_second_order_ego_estimate_actions: chex.Array,
+        listener_ego_belief_actions: chex.Array,
+        listener_other_belief_estimate_actions: chex.Array,
+        listener_second_order_ego_estimate_actions: chex.Array,
     ):
         """
         This method has many important jobs, but the main thing it does is abstract away the complexity
@@ -493,7 +496,9 @@ class StackedSignificationDecPOMDP:
 
             _step_env_utterance_stage  speakers have just emitted utterances: deliver them to
                                        the listeners, and record each speaker's refreshed
-                                       estimate of its listener.
+                                       estimate of its listener (b̄_o) and of what its
+                                       listener believes about it (b̿_e). The speaker's own
+                                       belief (b_e) does not change from uttering.
             _step_env_belief_stage     listeners have just emitted belief states: adopt them
                                        as their true beliefs (b_e), and record each
                                        listener's refreshed estimate of its speaker (b̄_o)
@@ -504,25 +509,29 @@ class StackedSignificationDecPOMDP:
 
         The stage is traced state (the rollout scans one stage per call), so the dispatch is a
         lax.cond, and both stages return the same structure. Each call therefore takes all
-        five action inputs; the stage that is not running ignores the other stage's inputs.
+        six action inputs; the stage that is not running ignores the other stage's inputs.
 
         Args:
             key: a PRNGKey.
             state: a StackedSignificationState.
             utterance_actions: [num_agents, utterance_action_dim], AGENT-indexed (row i is
                 agent i's utterance). Read on the utterance stage only.
-            belief_estimate_post_utterance: [num_agents, S], SUBJECT-indexed (row i is the
-                estimate ABOUT agent i's belief state). The new beliefs that agents are believed
-                to have after hearing the utterances that speakers have generated for them.
-                Read on the utterance stage only.
-            ego_belief_actions: [num_agents, S], AGENT-indexed (row i is agent i's proposed new
+            speaker_other_belief_estimate_actions: [num_agents, S], SUBJECT-indexed (row i is
+                the estimate ABOUT agent i's belief state). Each speaker's new b̄_o: the belief
+                it thinks its listener will have after hearing its utterance, so the rows read
+                are the LISTENERS'. Read on the utterance stage only.
+            speaker_second_order_ego_estimate_actions: [num_agents, S], AGENT-indexed, like
+                the stored b̿_e (row i is held by and about agent i). Each speaker's new b̿_e:
+                what it thinks its listener will believe about the speaker after hearing the
+                utterance. Only the speakers' rows are read. Read on the utterance stage only.
+            listener_ego_belief_actions: [num_agents, S], AGENT-indexed (row i is agent i's proposed new
                 belief b_e after hearing the utterance, a distribution over its game's S world
                 states). Only the listeners' rows are read. Read on the belief stage only.
-            other_belief_estimate_actions: [num_agents, S], SUBJECT-indexed (row i is the
+            listener_other_belief_estimate_actions: [num_agents, S], SUBJECT-indexed (row i is the
                 estimate ABOUT agent i's belief state). Each listener's new b̄_o, its estimate
                 of its speaker's belief after hearing the utterance, so the rows read are the
                 SPEAKERS'. Read on the belief stage only.
-            second_order_ego_estimate_actions: [num_agents, S], AGENT-indexed, like the stored
+            listener_second_order_ego_estimate_actions: [num_agents, S], AGENT-indexed, like the stored
                 b̿_e (row i is held by and about agent i). Each listener's new b̿_e: its
                 estimate of what its speaker now believes about the listener, after hearing
                 the utterance. Only the listeners' rows are read. Read on the belief stage only.
@@ -539,9 +548,16 @@ class StackedSignificationDecPOMDP:
         next_state, acted, post_comm_true_beliefs, post_comm_estimated_beliefs = jax.lax.cond(
             on_belief_stage,
             lambda _: self._step_env_belief_stage(
-                act_key, boundary_key, state, ego_belief_actions, other_belief_estimate_actions, second_order_ego_estimate_actions
+                act_key,
+                boundary_key,
+                state,
+                listener_ego_belief_actions,
+                listener_other_belief_estimate_actions,
+                listener_second_order_ego_estimate_actions,
             ),
-            lambda _: self._step_env_utterance_stage(state, utterance_actions, belief_estimate_post_utterance),
+            lambda _: self._step_env_utterance_stage(
+                state, utterance_actions, speaker_other_belief_estimate_actions, speaker_second_order_ego_estimate_actions
+            ),
             operand=None,
         )
 
@@ -567,12 +583,13 @@ class StackedSignificationDecPOMDP:
         obs = self.get_obs(obs_key, next_state)
         return next_state, obs, next_state.last_agent_rewards, post_comm_true_beliefs, post_comm_estimated_beliefs
 
-    def _step_env_utterance_stage(self, state, utterance_actions, belief_estimate_post_utterance):
+    def _step_env_utterance_stage(self, state, utterance_actions, other_belief_estimate_actions, second_order_ego_estimate_actions):
         """The utterance stage: speakers have just emitted utterances.
 
         Delivers each speaker's utterance to its listener, and stores each speaker's
-        refreshed estimate of its listener's belief. Nothing world-side moves, true beliefs
-        and b̿_e are unchanged, and there is never an act.
+        refreshed estimate of its listener's belief (b̄_o) and of what its listener believes
+        about it (b̿_e). True beliefs (b_e) are unchanged -- uttering is not evidence to the
+        speaker about the world -- nothing world-side moves, and there is never an act.
 
         Returns (state, acted=False, post_comm_true_beliefs, post_comm_estimated_beliefs),
         the debug beliefs being NaN (no act); the dialog is advanced by step_env.
@@ -590,15 +607,23 @@ class StackedSignificationDecPOMDP:
 
         # Speaker's estimate of its listener after uttering. state.estimated_agent_belief_states
         # is SUBJECT-indexed (row k = the estimate ABOUT agent k), and
-        # belief_estimate_post_utterance shares that indexing, so the rows that change are the
+        # other_belief_estimate_actions shares that indexing, so the rows that change are the
         # LISTENERS' and we write straight across.
-        estimated_beliefs = jnp.where(listens[:, None], belief_estimate_post_utterance, state.estimated_agent_belief_states)
+        estimated_beliefs = jnp.where(listens[:, None], other_belief_estimate_actions, state.estimated_agent_belief_states)
+
+        # Speaker's second-order estimate: what it thinks its listener now believes about it.
+        # b̿_e is stored by holder (row i is held by and about agent i), so the rows that
+        # change are the SPEAKERS'.
+        second_order_estimates = jnp.where(
+            speaks[:, None], second_order_ego_estimate_actions, state.second_order_agent_belief_estimates
+        )
 
         # No act, so the act's outputs are sentinels: NaN rewards (placeholders, to be filled in
         # retroactively once communication finishes) and -1 actions/observations (int32).
         next_state = state.replace(
             agent_utterance_actions_unrendered=utterances_to_deliver,
             estimated_agent_belief_states=estimated_beliefs,
+            second_order_agent_belief_estimates=second_order_estimates,
             last_agent_rewards=jnp.full((self.num_agents,), jnp.nan, dtype=jnp.float32),
             last_agent_actions=-jnp.ones((self.num_agents,), dtype=jnp.int32),
             last_agent_observations=-jnp.ones((self.num_agents,), dtype=jnp.int32),
@@ -655,11 +680,7 @@ class StackedSignificationDecPOMDP:
 
         # Listener's second-order estimate: what it now thinks its speaker believes about it.
         # b̿_e is stored by holder (row i is held by and about agent i), so the rows that
-        # change are the LISTENERS'.
-        # TODO: The speaker's side is not designed yet. After uttering, the speaker should
-        # also revise what it thinks the listener thinks of it; its b̿_e is left unchanged
-        # for now. Left stale, it biases the speaker's partner prediction π_o(b̄_o, b̿_e) at
-        # the act.
+        # change are the LISTENERS'. (The speakers' rows were written on the utterance stage.)
         post_comm_second_order_estimates = jnp.where(
             listens[:, None], second_order_ego_estimate_actions, state.second_order_agent_belief_estimates
         )
@@ -954,7 +975,7 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     # a padding-state one-hot would make the act's observation update degenerate).
     utterance_actions = jnp.ones((env.num_agents, env.utterance_action_dim))
     num_states = state.true_agent_belief_states.shape[-1]
-    ego_belief_actions = jnp.zeros((env.num_agents, num_states)).at[:, 0].set(1.0)
+    listener_ego_belief_actions = jnp.zeros((env.num_agents, num_states)).at[:, 0].set(1.0)
     belief_estimate = state.true_agent_belief_states.at[:, 0].add(0.5)
     belief_estimate = belief_estimate / belief_estimate.sum(axis=-1, keepdims=True)
 
@@ -971,7 +992,7 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     for t in range(6):
         walk_key, step_key = jax.random.split(walk_key)
         state, _, rewards, _, _ = env.step_env(
-            step_key, state, utterance_actions, belief_estimate, ego_belief_actions, belief_estimate, belief_estimate
+            step_key, state, utterance_actions, belief_estimate, belief_estimate, listener_ego_belief_actions, belief_estimate, belief_estimate
         )
         print(f"  step {t}:", fmt(state), "reward_sum=", float(rewards.sum()))
     print("ok: a_to_b_thrice walks 3 rounds and acts once on the last belief stage")
@@ -1054,7 +1075,7 @@ if __name__ == "__main__":
     s0, _ = sched_env.reset(jax.random.key(2))
     utt = jnp.ones((10, sched_env.utterance_action_dim))  # every agent "says" all-ones
     num_states = s0.true_agent_belief_states.shape[-1]
-    # ego_belief_actions are beliefs over states the listeners adopt, so they must be valid
+    # listener_ego_belief_actions are beliefs over states the listeners adopt, so they must be valid
     # distributions. Give them full support over the referents: a certain-but-wrong belief
     # (e.g. a one-hot) makes the next observation impossible, and the observation update
     # NaNs by design.
@@ -1072,12 +1093,17 @@ if __name__ == "__main__":
     # A third, for the listeners' estimates of what their speakers believe about them (b̿_e).
     self_est = s0.true_agent_belief_states.at[:, 2].add(0.5)
     self_est = self_est / self_est.sum(axis=-1, keepdims=True)
+    # A fourth, for the speakers' estimates of what their listeners believe about them (b̿_e).
+    speaker_self_est = s0.true_agent_belief_states.at[:, 0].add(1.5)
+    speaker_self_est = speaker_self_est / speaker_self_est.sum(axis=-1, keepdims=True)
     role0 = s0.game_roles.agent_role_assignment == 0
     role1 = ~role0
 
     # Section 2a: the utterance stage stashes ONLY the speaking role's (role 0 in a_to_b)
     # utterances; listeners (role 1) are NaN'd.
-    after_utt, after_utt_obs, after_utt_rewards, _, _ = sched_env.step_env(jax.random.key(0), s0, utt, other_est, valid_belief, speaker_est, self_est)
+    after_utt, after_utt_obs, after_utt_rewards, _, _ = sched_env.step_env(
+        jax.random.key(0), s0, utt, other_est, speaker_self_est, valid_belief, speaker_est, self_est
+    )
     # A communication-only step (the utterance stage) yields a NaN (placeholder) reward.
     assert jnp.all(jnp.isnan(after_utt_rewards)), "utterance-stage step returns NaN reward"
     assert jnp.array_equal(after_utt_rewards, after_utt.last_agent_rewards, equal_nan=True), "returned reward matches state"
@@ -1119,24 +1145,34 @@ if __name__ == "__main__":
     assert jnp.all(after_utt.estimated_agent_belief_states[role0] == s0.estimated_agent_belief_states[role0])
     print("ok: utterance stage records the listener-subject (role 1) post-utterance estimate")
 
+    # ...and each speaker's new b̿_e, stored by holder: the SPEAKERS' rows (role 0) take it,
+    # the listeners' rows are unchanged, and nobody's true belief moves.
+    assert jnp.all(after_utt.second_order_agent_belief_estimates[role0] == speaker_self_est[role0])
+    assert jnp.all(after_utt.second_order_agent_belief_estimates[role1] == s0.second_order_agent_belief_estimates[role1])
+    assert jnp.all(after_utt.true_agent_belief_states == s0.true_agent_belief_states)
+    print("ok: utterance stage records the speakers' (role 0) second-order estimates; true beliefs unchanged")
+
     # The following belief stage has the listeners (role 1) adopt their proposed
-    # ego_belief_actions; the speakers (role 0) keep their belief.
-    after_belief, _, _, _, _ = sched_env.step_env(jax.random.key(1), after_utt, utt, other_est, valid_belief, speaker_est, self_est)
+    # listener_ego_belief_actions; the speakers (role 0) keep their belief.
+    after_belief, _, _, _, _ = sched_env.step_env(
+        jax.random.key(1), after_utt, utt, other_est, speaker_self_est, valid_belief, speaker_est, self_est
+    )
     assert jnp.all(after_belief.true_agent_belief_states[role1] == valid_belief[role1])
     assert jnp.all(after_belief.true_agent_belief_states[role0] == s0.true_agent_belief_states[role0])
-    print("ok: belief stage applies listeners' (role 1) ego_belief_actions, speakers unchanged")
+    print("ok: belief stage applies listeners' (role 1) listener_ego_belief_actions, speakers unchanged")
 
     # ...and records each listener's estimate of its speaker: subject-indexed, so the
-    # SPEAKERS' rows (role 0) take other_belief_estimate_actions, while the listeners' rows
+    # SPEAKERS' rows (role 0) take listener_other_belief_estimate_actions, while the listeners' rows
     # keep what the utterance stage wrote.
     assert jnp.all(after_belief.estimated_agent_belief_states[role0] == speaker_est[role0])
     assert jnp.all(after_belief.estimated_agent_belief_states[role1] == other_est[role1])
     print("ok: belief stage records the speaker-subject (role 0) post-listening estimate")
 
     # ...and each listener's new b̿_e. b̿_e is stored by holder, so the LISTENERS' rows
-    # (role 1) take second_order_ego_estimate_actions; the speakers' (role 0) are unchanged.
+    # (role 1) take listener_second_order_ego_estimate_actions; the speakers' (role 0) keep what the
+    # utterance stage wrote.
     assert jnp.all(after_belief.second_order_agent_belief_estimates[role1] == self_est[role1])
-    assert jnp.all(after_belief.second_order_agent_belief_estimates[role0] == s0.second_order_agent_belief_estimates[role0])
+    assert jnp.all(after_belief.second_order_agent_belief_estimates[role0] == speaker_self_est[role0])
     print("ok: belief stage records the listeners' (role 1) second-order estimates, speakers' unchanged")
 
     def fmt(st):
@@ -1151,7 +1187,9 @@ if __name__ == "__main__":
     s = s0
     print("  reset:  ", fmt(s))
     for t in range(6):
-        s, _, step_rewards, _, _ = sched_env.step_env(jax.random.key(t), s, utt, other_est, valid_belief, speaker_est, self_est)
+        s, _, step_rewards, _, _ = sched_env.step_env(
+            jax.random.key(t), s, utt, other_est, speaker_self_est, valid_belief, speaker_est, self_est
+        )
         assert jnp.array_equal(step_rewards, s.last_agent_rewards, equal_nan=True), "step_env returns this step's reward"
         print(
             f"  step {t}:",
@@ -1203,7 +1241,7 @@ if __name__ == "__main__":
     assert int(b.game_counters.episode_index) == 0 and int(b.game_counters.episode_horizon) == 2
     print("=== episode boundary walk (horizon=2, b_to_a) ===")
     for t in range(4):
-        b, _, _, _, _ = boundary_env.step_env(jax.random.key(100 + t), b, utt3, other_est3, valid3, other_est3, other_est3)
+        b, _, _, _, _ = boundary_env.step_env(jax.random.key(100 + t), b, utt3, other_est3, other_est3, valid3, other_est3, other_est3)
         print(
             f"  step {t}: env_iter={int(b.game_counters.underlying_env_timestep)} "
             f"cum_env={int(b.game_counters.cumulative_env_timestep)} episode={int(b.game_counters.episode_index)}"

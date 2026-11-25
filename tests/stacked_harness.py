@@ -44,13 +44,16 @@ EstimateMode = Literal["oracle", "keep"]
 
 
 class Actions(NamedTuple):
-    """The five per-call step_env inputs, with step_env's own index conventions."""
+    """The six per-call step_env inputs, in step_env's order and with its index conventions."""
 
+    # Utterance stage (the speakers'):
     utterances: chex.Array  # [num_agents, utterance_action_dim], AGENT-indexed
-    estimates: chex.Array  # [num_agents, S], SUBJECT-indexed (row i = estimate ABOUT agent i); speakers' estimates of listeners
-    beliefs: chex.Array  # [num_agents, S], AGENT-indexed (row i = agent i's new belief)
-    other_belief_estimate_actions: chex.Array  # [num_agents, S], SUBJECT-indexed; listeners' estimates of speakers
-    second_order_ego_estimate_actions: chex.Array  # [num_agents, S], by holder; listeners' new b̿_e
+    speaker_other_belief_estimate_actions: chex.Array  # [num_agents, S], SUBJECT-indexed (row i = estimate ABOUT agent i); speakers' b̄_o of listeners
+    speaker_second_order_ego_estimate_actions: chex.Array  # [num_agents, S], by holder; speakers' new b̿_e
+    # Belief stage (the listeners'):
+    listener_ego_belief_actions: chex.Array  # [num_agents, S], AGENT-indexed (row i = agent i's new belief)
+    listener_other_belief_estimate_actions: chex.Array  # [num_agents, S], SUBJECT-indexed; listeners' b̄_o of speakers
+    listener_second_order_ego_estimate_actions: chex.Array  # [num_agents, S], by holder; listeners' new b̿_e
 
 
 class Rollout(NamedTuple):
@@ -138,10 +141,11 @@ class Harness:
         estimates = state.true_agent_belief_states if self.estimate_mode == "oracle" else state.estimated_agent_belief_states
         return Actions(
             utterances=sentinel_utterances(self.env.num_agents, self.env.utterance_action_dim),
-            estimates=estimates,
-            beliefs=state.true_agent_belief_states,
-            other_belief_estimate_actions=estimates,
-            second_order_ego_estimate_actions=state.second_order_agent_belief_estimates,
+            speaker_other_belief_estimate_actions=estimates,
+            speaker_second_order_ego_estimate_actions=state.second_order_agent_belief_estimates,
+            listener_ego_belief_actions=state.true_agent_belief_states,
+            listener_other_belief_estimate_actions=estimates,
+            listener_second_order_ego_estimate_actions=state.second_order_agent_belief_estimates,
         )
 
     def step(self, key: chex.PRNGKey, state: StackedSignificationState, actions: Actions | None = None):
@@ -151,10 +155,11 @@ class Harness:
             key,
             state,
             actions.utterances,
-            actions.estimates,
-            actions.beliefs,
-            actions.other_belief_estimate_actions,
-            actions.second_order_ego_estimate_actions,
+            actions.speaker_other_belief_estimate_actions,
+            actions.speaker_second_order_ego_estimate_actions,
+            actions.listener_ego_belief_actions,
+            actions.listener_other_belief_estimate_actions,
+            actions.listener_second_order_ego_estimate_actions,
         )
 
     def rollout(self, seed: int = 0, num_steps: int = 10, actions_fn: Callable | None = None) -> Rollout:

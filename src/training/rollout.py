@@ -124,7 +124,7 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
         lambda: render_utterance_fn(render_rng, obs_partner_utterances),
         lambda: jnp.zeros((num_agents, utterance_image_dim, utterance_image_dim), dtype=jnp.float32),
     )  # [num_agents, D, D]
-    ego_belief_actions, belief_log_probs, belief_values = inference_strategy.run_belief_agents(
+    listener_ego_belief_actions, belief_log_probs, belief_values = inference_strategy.run_belief_agents(
         bel_rng,
         belief_pop,
         utterance_pop,
@@ -133,34 +133,38 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
         render_utterance_fn,
     )
 
-    # --- Post-utterance belief estimate (step_env's third input) -------------
+    # --- Speaker's post-utterance estimates (step_env's 3rd and 4th inputs) ----
     # SKELETON: step_env also wants each speaker's refreshed estimate of its
-    # listener-partner's belief (SUBJECT-indexed: row i = estimate ABOUT agent i). For now
-    # pass the existing estimate through unchanged so shapes/plumbing are correct; replace
-    # with the speaker's ToM re-estimate (belief model run on its own utterance) later.
-    belief_estimate_post_utterance = env_state.estimated_agent_belief_states
+    # listener-partner's belief (b̄_o; SUBJECT-indexed: row i = estimate ABOUT agent i) and
+    # of what that listener believes about the speaker (b̿_e; row i held by agent i). For
+    # now pass the existing estimates through unchanged so shapes/plumbing are correct;
+    # replace with the speaker's ToM re-estimates (e.g. belief model run on its own
+    # utterance) later.
+    speaker_other_belief_estimate_actions = env_state.estimated_agent_belief_states
+    speaker_second_order_ego_estimate_actions = env_state.second_order_agent_belief_estimates
 
-    # --- Post-listening belief estimate (step_env's fifth input) -------------
+    # --- Listener's post-listening estimate (step_env's 6th input) ------------
     # SKELETON: step_env also wants each listener's refreshed estimate of its speaker's
     # belief (SUBJECT-indexed: row i = estimate ABOUT agent i). Passed through unchanged for
     # now, like the post-utterance estimate; replace with the listener's re-estimate later.
-    other_belief_estimate_actions = env_state.estimated_agent_belief_states
+    listener_other_belief_estimate_actions = env_state.estimated_agent_belief_states
 
-    # --- Post-listening second-order estimate (step_env's sixth input) -------
+    # --- Listener's post-listening second-order estimate (7th input) ---------
     # SKELETON: step_env also wants each listener's new b̿_e -- what it now thinks its
     # speaker believes about it (row i held by and about agent i). Passed through unchanged
     # for now; replace with the listener's re-estimate later.
-    second_order_ego_estimate_actions = env_state.second_order_agent_belief_estimates
+    listener_second_order_ego_estimate_actions = env_state.second_order_agent_belief_estimates
 
     # --- Step the environment one stage --------------------------------------
     env_state, next_obs, rewards, _, _ = env.step_env(
         step_rng,
         env_state,
         utterance_actions,
-        belief_estimate_post_utterance,
-        ego_belief_actions,
-        other_belief_estimate_actions,
-        second_order_ego_estimate_actions,
+        speaker_other_belief_estimate_actions,
+        speaker_second_order_ego_estimate_actions,
+        listener_ego_belief_actions,
+        listener_other_belief_estimate_actions,
+        listener_second_order_ego_estimate_actions,
     )
 
     # An episode boundary re-routes assignments and resamples world states/beliefs, so the
@@ -178,7 +182,7 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
         utterance_value=utterance_values,
         utterance_own_belief=own_beliefs,
         utterance_partner_estimate=obs_partner_estimates,
-        belief_action=ego_belief_actions,
+        belief_action=listener_ego_belief_actions,
         belief_log_prob=belief_log_probs,
         belief_value=belief_values,
         belief_previous_belief=own_beliefs,

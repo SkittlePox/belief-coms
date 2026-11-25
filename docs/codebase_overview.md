@@ -39,7 +39,8 @@ through or delete them as they're resolved.
   GAE tests use no NaN rewards. That is why none of this was caught.
 - Policies are Boltzmann over hand-specified Q functions of two beliefs, Q(b_e, b̄_o, a)
   (see "Q-function policies" under `envs`). The env tracks three levels per agent, b_e,
-  b̄_o and b̿_e (G1, G2), but communication moves none of the estimates yet (G3).
+  b̄_o and b̿_e (G1, G2). The env accepts communication updates to all of them, but the
+  rollout passes the estimates through unchanged, since no model produces them yet (G3).
 - No wandb logging (G5). The only environment is the guessing game, which is a weak test
   of communication (D4).
 
@@ -174,11 +175,11 @@ small and clean.
 
 **`step_env` is split by stage (2026-11-25).** `step_env` dispatches with a `lax.cond` on
 the (traced) stage to `_step_env_utterance_stage` (deliver utterances, store the speaker's
-estimate of its listener) or `_step_env_belief_stage` (listeners adopt their beliefs and
-store their estimates of their speakers and their new b̿_e, then the act and the episode
-boundary on a block's last round), and then advances the schedule and builds the
-observation for both. The rollout still makes one `step_env` call per stage with all five
-action inputs, and both stages return the same structure, so the no-act
+b̄_o of its listener and its new b̿_e) or `_step_env_belief_stage` (listeners adopt their
+beliefs and store their b̄_o of their speakers and their new b̿_e, then the act and the
+episode boundary on a block's last round), and then advances the schedule and builds the
+observation for both (see G3 for the arguments). The rollout still makes one `step_env`
+call per stage with all six action inputs, and both stages return the same structure, so the no-act
 placeholders (NaN rewards, -1 actions and observations, NaN debug beliefs) remain.
 
 **B5. Env beliefs go NaN within a few acts at initialization.** Found 2026-11-16 in
@@ -219,21 +220,22 @@ returned by `get_obs` as the third of `(beliefs, estimated_beliefs, second_order
 utterances)`. It is never NaN'd by stage; the rollout unpacks it but no agent consumes it
 yet.
 
-**G3. Communication never moves the estimates.**
-- The speaker's post-utterance estimate of the listener is a passthrough in the rollout
-  (`belief_estimate_post_utterance = env_state.estimated_agent_belief_states` in
-  [rollout.py](../src/training/rollout.py)), so it never changes during communication.
-- ~~The listener never updates its estimate of the *speaker* after hearing an utterance~~ —
-  the env side is done (2026-11-25): the belief stage takes `other_belief_estimate_actions`
-  (subject-indexed; the speakers' rows are written). The rollout still passes the existing
-  estimate through unchanged, as it does for `belief_estimate_post_utterance`; no model
-  produces either yet.
-- b̿_e: the listener's side is wired (2026-11-25). The belief stage takes
-  `second_order_ego_estimate_actions`, the listener's new estimate of what its speaker
-  believes about it, and writes the listeners' rows (b̿_e is stored by holder). The rollout
-  passes the existing b̿_e through unchanged. The speaker's side is still a TODO in
-  `_step_env_belief_stage` section 2: after uttering, the speaker should revise what it
-  thinks the listener thinks of it. A stale b̿_e biases the partner prediction
+**G3. ~~Communication never moves the estimates~~ — env side done; no model produces the
+new estimates yet.** Since 2026-11-25 each stage takes the communicating agent's updated
+estimates (step_env's arguments, in order):
+- Utterance stage, the speaker: `speaker_other_belief_estimate_actions` (its b̄_o of the
+  listener; subject-indexed, so the listeners' rows are written) and
+  `speaker_second_order_ego_estimate_actions` (its b̿_e, what it thinks the listener now
+  believes about it; stored by holder, so the speakers' rows). The speaker's own b_e does
+  not change from uttering. (`speaker_other_belief_estimate_actions` was
+  `belief_estimate_post_utterance`.)
+- Belief stage, the listener: `listener_ego_belief_actions` (its new b_e),
+  `listener_other_belief_estimate_actions` (its b̄_o of the speaker; the speakers' rows) and
+  `listener_second_order_ego_estimate_actions` (its b̿_e, what it thinks the speaker now believes
+  about it; the listeners' rows).
+- The rollout ([rollout.py](../src/training/rollout.py)) passes the existing estimates
+  through unchanged for all four estimate inputs, so in training communication still moves
+  only the listener's b_e. A stale b̄_o or b̿_e biases the partner prediction
   π_o(b̄_o, b̿_e) at the act.
 
 **D1. Reset observations.** The stacked env emits no reset observation; beliefs and
