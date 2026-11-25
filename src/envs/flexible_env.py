@@ -2,10 +2,10 @@
 
 This is the *foundation* of the env-definition dependency graph: it defines
 ``FlexibleEnvParams`` (the dense tensors describing one DecPOMDP), the
-``OptimalPolicy`` type, and ``FlexibleEnv`` — a generic runtime that drives any
-``FlexibleEnvParams`` (reset / step_env / get_obs plus the ``_joint_*`` gather
-API). Per-game-type definitions (e.g. envs/guessing_game.py) build a
-``FlexibleEnvParams``; envs/env_assembly.py stacks them. Neither this module nor the
+``QFunction`` / ``GameSpec`` types, ``boltzmann_policy``, and ``FlexibleEnv`` — a
+generic runtime that drives any ``FlexibleEnvParams`` (reset / step_env / get_obs
+plus the ``_joint_*`` gather API). Per-game-type definitions (e.g.
+envs/guessing_game.py) build a ``GameSpec``; envs/env_assembly.py stacks them. Neither this module nor the
 env-definition modules import the stacked env, keeping the import graph acyclic.
 """
 
@@ -14,21 +14,42 @@ import distrax
 import jax.numpy as jnp
 from flax import struct
 from functools import partial
-from typing import Callable
+from typing import Callable, NamedTuple, Tuple
 
 
-# A policy maps a belief (Categorical over states) to an action distribution
-# (Categorical over actions). Arbitrary Python callables — kept OUT of
-# FlexibleEnvParams (which holds only traceable array data).
-OptimalPolicy = Callable[[distrax.Categorical], distrax.Categorical]
+# A Q function maps the ego's own belief b_e and its estimate of the other agent's
+# belief b̄_o (both Categoricals over states) to one value per action, shape [A]:
+#   q_function(ego_belief, other_belief_estimate) -> [A]
+# A value of -inf marks an action as unavailable (padding uses this). Arbitrary Python
+# callables -- kept OUT of FlexibleEnvParams (which holds only traceable array data).
+QFunction = Callable[[distrax.Categorical, distrax.Categorical], chex.Array]
 
 # Games are dyadic: every game type has exactly this many roles.
 NUM_ROLES = 2
 
-# A bundle of optimal policies, one per (game_type, role):
-#   optimal_policy_bundle(game_type, role, belief) -> Categorical over actions.
+# A bundle of Boltzmann policies over Q functions, one per (game_type, role):
+#   policy_bundle(game_type, role, ego_belief, other_belief_estimate) -> Categorical over actions.
 # game_type and role may be traced. Built by envs.env_assembly.assemble_environments.
-OptimalPolicyBundle = Callable[[chex.Array, chex.Array, distrax.Categorical], distrax.Categorical]
+PolicyBundle = Callable[[chex.Array, chex.Array, distrax.Categorical, distrax.Categorical], distrax.Categorical]
+
+
+class GameSpec(NamedTuple):
+    """Everything that defines one game type, as returned by its EnvSpec builder."""
+
+    params: "FlexibleEnvParams"
+    q_functions: Tuple[QFunction, ...]  # indexed by role; NUM_ROLES of them
+    inverse_temperature: float  # β of every role's Boltzmann policy in this game
+
+
+def boltzmann_policy(q_values: chex.Array, inverse_temperature) -> distrax.Categorical:
+    """π(a) ∝ exp(β · Q(a)).
+
+    An action whose Q value is -inf (unavailable, e.g. padding) gets probability 0 at
+    every β, including β = 0, where β · -inf alone would be NaN. NaN Q values are not
+    touched: they make the policy NaN, which is the intended tripwire.
+    """
+    logits = jnp.where(jnp.isneginf(q_values), -jnp.inf, inverse_temperature * q_values)
+    return distrax.Categorical(logits=logits)
 
 
 @struct.dataclass

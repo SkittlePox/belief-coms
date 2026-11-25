@@ -3,15 +3,33 @@ import jax, chex
 import jax.numpy as jnp
 import distrax
 from flax import struct
-from typing import Any, Callable, Sequence, Tuple
+from typing import Any, Callable, Literal, Sequence, Tuple, get_args
 from functools import partial
 from communication.game_role_assignment import AssignmentFn
 from communication.communication_scheme import CommunicationSchemeFn
 
-# FlexibleEnvParams / OptimalPolicyBundle / NUM_ROLES are defined in envs.flexible_env (the leaf of
+# FlexibleEnvParams / PolicyBundle / NUM_ROLES are defined in envs.flexible_env (the leaf of
 # the env-definition dependency graph) and consumed here.
-from envs.flexible_env import NUM_ROLES, FlexibleEnvParams, OptimalPolicyBundle
-from tools.belief_representations import update_other_belief_estimate_with_observation_only, update_with_observation_only
+from envs.flexible_env import NUM_ROLES, FlexibleEnvParams, PolicyBundle
+from tools.belief_representations import (
+    update_other_belief_estimate_with_observation_only,
+    update_second_order_ego_estimate_with_observation_only,
+    update_with_observation_only,
+)
+
+
+# How to close the belief hierarchy above the tracked levels (b_e, b̄_o, b̿_e). Two
+# action distributions the belief updates need are predicted from untracked levels:
+#   ego_action_prior   = π_e(b̿_e, b⃛_o)   our action, as the partner predicts it
+#   other_action_prior = π_o(b⃛_o, b⁗_e)   their action, as they think we predict it
+# "uniform":    both are uniform over the game's real actions -- no claim about what the
+#               partner models. Agents use only what they could feasibly know.
+# "stationary": every untracked level copies the level two below it (b⃛_o := b̄_o,
+#               b⁗_e := b̿_e), so ego_action_prior = π_e(b̿_e, b̄_o) and
+#               other_action_prior = π_o(b̄_o, b̿_e). Assumes the partner models us the way
+#               we model them, which credits agents with more than separate systems
+#               could know.
+BeliefClosure = Literal["uniform", "stationary"]
 
 
 # A communicative round runs in two stages, one per step_env call; the state's
@@ -43,16 +61,20 @@ BELIEF_STAGE = 1  # the listener emits a belief action, completing the round
 #
 # Beliefs (top-level, subject-indexed)
 # ------------------------------------
-# true_agent_belief_states[i]:      Agent i's OWN belief over world states [S].
+# true_agent_belief_states[i]:      Agent i's OWN belief over world states [S].   (b_e)
 # estimated_agent_belief_states[i]: The estimate ABOUT agent i's belief (held by i's
 #                                   partner). Subject-indexed so it aligns row-for-row
-#                                   with true beliefs.
+#                                   with true beliefs.                            (b̄_o)
+# second_order_agent_belief_estimates[i]: Agent i's estimate of its partner's estimate
+#                                   of agent i's belief. It is ABOUT agent i and HELD by
+#                                   agent i, so row i is both.                    (b̿_e)
 #
 # To get agent i's estimate OF its partner: estimated_agent_belief_states[partner(i)]
 # (the partner map is its own inverse in a dyad).
 #
-# The estimate matters because each agent marginalizes its partner's unobserved action
-# via the partner's optimal policy applied to this estimate.
+# Policies are Boltzmann over Q(b_own, b_estimate_of_partner). Agent i acts on
+# (b_e, b̄_o), and predicts its partner's unobserved action from its estimates of the
+# partner's inputs, (b̄_o, b̿_e) -- which is why the env tracks b̿_e.
 #
 # belief_estimate_post_utterance (step_env input) is also subject-indexed: row i is the
 # refreshed estimate ABOUT agent i after i's partner (the speaker) has uttered.
@@ -138,6 +160,9 @@ class StackedSignificationState:
     # estimated_agent_belief_states is what agent i's dyadic partner estimates i believes.
     true_agent_belief_states: chex.Array  # [num_agents, S]
     estimated_agent_belief_states: chex.Array  # [num_agents, S]  (estimate ABOUT agent i)
+    # Row i is agent i's estimate of its partner's estimate of agent i's belief: about i
+    # AND held by i, so no partner gather is needed in either direction.
+    second_order_agent_belief_estimates: chex.Array  # [num_agents, S]
 
     # Reward: each agent's underlying-DecPOMDP reward from the most recent act (the
     # stacked game's reward signal). NaN on non-act (communication-only) steps.
@@ -163,24 +188,30 @@ class StackedSignificationDecPOMDP:
         self,
         num_agents: int,
         all_env_parameters: FlexibleEnvParams,
-        optimal_policy_bundle: OptimalPolicyBundle,
+        policy_bundle: PolicyBundle,
         assignment_fn: AssignmentFn,
         communication_scheme_fn: CommunicationSchemeFn,
         utterance_action_dim: int,
         skip_first_communication_step: bool,
+        belief_closure: BeliefClosure = "uniform",
     ) -> None:
         """
         Args:
             num_agents
             all_env_parameters: Stacked FlexibleEnvParams, indexed by game type along the leading axis.
-            optimal_policy_bundle: optimal_policy_bundle(game_type, role, belief) -> Categorical
-                over actions; game_type and role may be traced (see
+            policy_bundle: policy_bundle(game_type, role, ego_belief, other_belief_estimate)
+                -> Categorical over actions, a Boltzmann policy over that (game type,
+                role)'s Q function; game_type and role may be traced (see
                 envs.env_assembly.assemble_environments).
             assignment_fn
             communication_scheme_fn: Maps the cumulative in-game timestep to the
                 CommunicationScheme in force at that timestep (see communication_scheme.py).
             utterance_action_dim: Constant length of each agent's utterance-action vector.
+            belief_closure: How the belief updates fill in the untracked levels above b̿_e
+                (see BeliefClosure).
         """
+        if belief_closure not in get_args(BeliefClosure):
+            raise ValueError(f"belief_closure must be one of {get_args(BeliefClosure)}, got {belief_closure!r}")
         self.num_agents = num_agents
         self.all_env_parameters = all_env_parameters
         self.assignment_fn = assignment_fn
@@ -192,43 +223,63 @@ class StackedSignificationDecPOMDP:
         # read and emit, shared by all game types (padding makes it uniform).
         self.belief_dim = all_env_parameters.initial_state_distribution.shape[-1]
 
-        self.optimal_policy_bundle = optimal_policy_bundle
+        self.policy_bundle = policy_bundle
+        self.belief_closure = belief_closure
         self.num_game_types = all_env_parameters.transition.shape[0]
 
-    def _agent_belief_updates(self, game_type, role, ego_belief_probs, other_belief_estimate_probs, observation, action):
-        """True-belief + other-belief-estimate update for one agent.
+    def _untracked_action_priors(self, game_type, role, game_params, other_belief_estimate, second_order_ego_estimate, other_action_distribution):
+        """``(ego_action_prior, other_action_prior)`` under ``self.belief_closure``.
+
+        Both are predicted from levels above b̿_e, which are not tracked (see BeliefClosure).
+        ``belief_closure`` is a Python string, so this branches at trace time.
+        """
+        if self.belief_closure == "stationary":
+            # b⃛_o := b̄_o and b⁗_e := b̿_e. Their prediction of us is then π_e(b̿_e, b̄_o);
+            # their action as they think we predict it is π_o(b̄_o, b̿_e) -- our own
+            # prediction of them.
+            ego_action_prior = self.policy_bundle(game_type, role, second_order_ego_estimate, other_belief_estimate)
+            return ego_action_prior, other_action_distribution
+        # "uniform": over this game's real actions (padded actions are never taken).
+        num_actions = game_params.transition.shape[1]
+        real_actions = (jnp.arange(num_actions) < game_params.num_actions).astype(jnp.float32)
+        uniform = distrax.Categorical(probs=real_actions / real_actions.sum())
+        return uniform, uniform
+
+    def _agent_belief_updates(self, game_type, role, ego_belief_probs, other_belief_estimate_probs, second_order_ego_estimate_probs, observation, action):
+        """One agent's update of all three tracked levels (b_e, b̄_o, b̿_e) after an act.
 
         Takes and returns raw [S] probs (the env's storage format); wraps them in
-        Categoricals here for the tools.belief_representations functions.
-
-        NOTE: We may want to keep track of and update a second-order belief: what agent A
-        believes agent B believes about agent A's belief state.
+        Categoricals here for the tools.belief_representations functions. Every update
+        reads the PREVIOUS values of all three levels.
 
         Conditioned on the agent's environment (``game_type``, by gathering that game
         type's params out of the stacked params -- the belief functions accept traced
-        params) and its ``role`` (passed as the traced ``ego_role``). The other
-        agent's action is unobserved, so both updates marginalize over it via the
-        other role's optimal policy. Assumes dyadic games (other role = 1 - role).
+        params) and its ``role`` (passed as the traced ``ego_role``). The other agent's
+        action is unobserved, so the updates marginalize over it, predicting it with the
+        other role's Boltzmann policy at our estimates of its inputs, π_o(b̄_o, b̿_e).
+        Assumes dyadic games (other role = 1 - role).
 
-        Returns (new_true_belief_probs, new_other_estimate_probs).
+        Returns (new_true_belief_probs, new_other_estimate_probs, new_second_order_probs).
         """
         # This game type's (unstacked) params; game_type may be traced.
         game_params = jax.tree.map(lambda leaf: leaf[game_type], self.all_env_parameters)
         ego_belief = distrax.Categorical(probs=ego_belief_probs)
         other_belief_estimate = distrax.Categorical(probs=other_belief_estimate_probs)
-        other_policy = lambda belief: self.optimal_policy_bundle(game_type, 1 - role, belief)
-        # NOTE: uniform until we track a second-order estimate (what we estimate the other
-        # agent believes we believe); then this becomes our policy applied to that estimate.
-        num_actions = game_params.transition.shape[1]
-        ego_action_prior = distrax.Categorical(probs=jnp.ones(num_actions) / num_actions)
+        second_order_ego_estimate = distrax.Categorical(probs=second_order_ego_estimate_probs)
+
+        # Their action at the act, as we predict it: their policy at their inputs as we
+        # estimate them -- their belief (b̄_o) and their estimate of ours (b̿_e).
+        other_action_distribution = self.policy_bundle(game_type, 1 - role, other_belief_estimate, second_order_ego_estimate)
+        ego_action_prior, other_action_prior = self._untracked_action_priors(
+            game_type, role, game_params, other_belief_estimate, second_order_ego_estimate, other_action_distribution
+        )
 
         new_true = update_with_observation_only(
             game_params,
             ego_belief=ego_belief,
-            other_belief_estimate=other_belief_estimate,
             ego_observation=observation,
             ego_action_tminus1=action,
-            other_policy=other_policy,
+            other_action_distribution=other_action_distribution,
             ego_role=role,
         )
         new_estimate = update_other_belief_estimate_with_observation_only(
@@ -237,15 +288,27 @@ class StackedSignificationDecPOMDP:
             other_belief_estimate=other_belief_estimate,
             ego_observation=observation,
             ego_action=action,
-            other_action_distribution=other_policy(other_belief_estimate),
+            other_action_distribution=other_action_distribution,
             ego_role=role,
             ego_action_prior=ego_action_prior,
         )
-        return new_true.probs, new_estimate.probs
+        new_second_order = update_second_order_ego_estimate_with_observation_only(
+            game_params,
+            ego_belief=ego_belief,
+            other_belief_estimate=other_belief_estimate,
+            second_order_ego_estimate=second_order_ego_estimate,
+            ego_observation=observation,
+            ego_action=action,
+            other_action_distribution=other_action_distribution,
+            ego_role=role,
+            ego_action_prior=ego_action_prior,
+            other_action_prior=other_action_prior,
+        )
+        return new_true.probs, new_estimate.probs, new_second_order.probs
 
     @partial(jax.jit, static_argnums=(0,))
     def get_obs(self, key: chex.PRNGKey, state: StackedSignificationState):
-        """Per-agent observation: (beliefs, estimated_beliefs, utterances).
+        """Per-agent observation: (beliefs, estimated_beliefs, second_order_estimates, utterances).
 
         ``key`` is currently unused (the masking is deterministic) but kept in the
         signature for future stochastic observations.
@@ -258,6 +321,8 @@ class StackedSignificationDecPOMDP:
             ENGAGED with -- i.e. what i (a sender) thinks its partner believes. Storage is
             subject-indexed (row k = estimate ABOUT agent k), so this is the partner's row,
             gathered by partner_agent.
+          - second_order_estimates[i] is what agent i thinks its partner thinks agent i
+            believes (b̿_e). Stored by holder, which is also the subject, so row i as is.
           - utterances[i] is the utterance agent i should HEAR, namely the one its partner
             (the speaker) emitted -- again the partner's row of the (speaker-indexed)
             utterance store, gathered by partner_agent.
@@ -270,6 +335,9 @@ class StackedSignificationDecPOMDP:
           - BELIEF_STAGE: the agent forms a new belief from the received utterance, so the
             belief inputs are meaningless -> beliefs and estimated_beliefs are NaN.
 
+        second_order_estimates are never NaN'd. The speaker conditions on them when
+        choosing an utterance, and the listener needs them on the belief stage to read
+        an utterance as aimed at what the speaker thinks it believes.
         """
         partner_agent = state.game_roles.partner_agent
 
@@ -285,7 +353,8 @@ class StackedSignificationDecPOMDP:
         # under that speaker's own row.
         partner_utterances = state.agent_utterance_actions_unrendered[partner_agent]
         utterances = jnp.where(on_utterance_stage, jnp.nan, partner_utterances)
-        return beliefs, estimated_beliefs, utterances
+        second_order_estimates = state.second_order_agent_belief_estimates
+        return beliefs, estimated_beliefs, second_order_estimates, utterances
 
     def _step_underlying_env(
         self,
@@ -294,15 +363,13 @@ class StackedSignificationDecPOMDP:
         game_roles: GameRoleState,
         true_agent_belief_states,
         estimated_agent_belief_states,
+        second_order_agent_belief_estimates,
     ):
         """Step every game's DecPOMDP once and update beliefs from the observation.
 
-        NOTE: We may want policies to be a function of both the speaker's belief and the listener's belief...
-        NOTE: We also may want to keep second-order belief states.
-
-        Each agent samples an action from its optimal policy given its true belief; the
-        per-game joint actions drive the transition and joint observation; each agent
-        then updates its true belief and its estimate of the partner from its own
+        Each agent samples an action from its Boltzmann policy at (its own belief, its
+        estimate of its partner); the per-game joint actions drive the transition and
+        joint observation; each agent then updates all three tracked levels from its own
         observation (the other agent's action is unobserved, so the updates marginalize
         over it).
 
@@ -311,7 +378,7 @@ class StackedSignificationDecPOMDP:
         the update and scatter the refreshed estimates back the same way afterward.
 
         Returns (next_game_states, next_true_beliefs, next_estimated_beliefs,
-        agent_rewards, agent_actions, agent_observations), where agent_rewards[i] is
+        next_second_order_estimates, agent_rewards, agent_actions, agent_observations), where agent_rewards[i] is
         agent i's underlying-DecPOMDP reward R(s, a0, a1, s') for this step -- the reward
         signal for the stacked game -- agent_actions[i] is the action agent i sampled and
         actually took in its game, and agent_observations[i] is the observation it drew
@@ -329,12 +396,14 @@ class StackedSignificationDecPOMDP:
 
         action_key, transition_key, obs_key = jax.random.split(key, 3)
 
-        # 1. Each agent samples an action from its optimal policy given its true belief.
+        # 1. Each agent samples an action from its Boltzmann policy at (b_e, b̄_o).
         #    vmap because the bundle dispatches on a scalar (game_type, role).
-        agent_actions = jax.vmap(
-            lambda game_type, role, belief_probs, k: self.optimal_policy_bundle(game_type, role, distrax.Categorical(probs=belief_probs)).sample(seed=k)
-        )(
-            agent_game_types, agent_role_assignment, true_agent_belief_states, jax.random.split(action_key, self.num_agents)
+        def sample_action(game_type, role, belief_probs, estimate_probs, k):
+            policy = self.policy_bundle(game_type, role, distrax.Categorical(probs=belief_probs), distrax.Categorical(probs=estimate_probs))
+            return policy.sample(seed=k)
+
+        agent_actions = jax.vmap(sample_action)(
+            agent_game_types, agent_role_assignment, true_agent_belief_states, estimate_of_partner, jax.random.split(action_key, self.num_agents)
         )  # [num_agents]
 
         # 2. Assemble per-game joint actions in canonical (role 0, role 1) order.
@@ -368,12 +437,13 @@ class StackedSignificationDecPOMDP:
         game_obs_by_role = jnp.stack([flat_obs // num_obs, flat_obs % num_obs], axis=1)  # [num_games, num_roles]
         agent_observations = game_obs_by_role[agent_game_assignment, agent_role_assignment]  # [num_agents]
 
-        # 5. Per-agent belief + estimate-of-partner update from the observation.
-        next_true, next_estimate_of_partner = jax.vmap(self._agent_belief_updates)(
+        # 5. Per-agent update of all three tracked levels from the observation.
+        next_true, next_estimate_of_partner, next_second_order = jax.vmap(self._agent_belief_updates)(
             agent_game_types,
             agent_role_assignment,
             true_agent_belief_states,
             estimate_of_partner,
+            second_order_agent_belief_estimates,  # row i is held by agent i: no gather
             agent_observations,
             agent_actions,
         )
@@ -385,6 +455,7 @@ class StackedSignificationDecPOMDP:
             game_next_states,
             next_true,
             next_estimated,
+            next_second_order,
             agent_rewards,
             agent_actions,
             agent_observations,
@@ -420,8 +491,8 @@ class StackedSignificationDecPOMDP:
         to happen after belief stages. Specifically, 1) the underlying DecPOMDP needs to actually advance
         according to the new belief states of the agents (by executing a policy conditioned on a belief 
         state), and 2) the agents beliefs need to update in accordance with their perceived env observation
-        from env interaction, and 3) the agents' estimates about their partners beliefs need to update in 
-        accordance with their perceived env observation.
+        from env interaction, and 3) the agents' estimates about their partners' beliefs (and of their
+        partners' estimates of them) need to update in accordance with their perceived env observation.
         
         After all this happens, a new utterance stage begins again.
 
@@ -503,9 +574,16 @@ class StackedSignificationDecPOMDP:
         update_listener_true_belief = on_belief_stage & agent_listens_binary_mask  # [num_agents]
         post_comm_true_beliefs = jnp.where(update_listener_true_belief[:, None], belief_actions, state.true_agent_belief_states)
 
+        # 2d. Second-order estimates (b̿_e) do not move during communication.
+        # TODO: Re-design this next. After a round the speaker should revise what it thinks
+        # the listener thinks of it, and the listener what it thinks the speaker now thinks
+        # it believes. Left stale, b̿_e biases every partner prediction π_o(b̄_o, b̿_e) made
+        # at the act.
+        post_comm_second_order_estimates = state.second_order_agent_belief_estimates
+
         # === 3. World step (the act) ========================================
         # On an act phase, every game takes one DecPOMDP step: each agent samples an action from
-        # its optimal policy given its post-communication belief, the games transition
+        # its Boltzmann policy at its post-communication (b_e, b̄_o), the games transition
         # and emit observations, and beliefs update from those observations. The step also
         # yields each agent's real reward from the environment, which becomes the communication game's
         # reward. Without an act phase, nothing world-side moves and the outputs are the no-act
@@ -517,6 +595,7 @@ class StackedSignificationDecPOMDP:
                 state.game_roles,
                 post_comm_true_beliefs,
                 post_comm_estimated_beliefs,
+                post_comm_second_order_estimates,
             )
 
         def hold_world(_):
@@ -526,6 +605,7 @@ class StackedSignificationDecPOMDP:
                 state.game_states,
                 post_comm_true_beliefs,
                 post_comm_estimated_beliefs,
+                post_comm_second_order_estimates,
                 jnp.full((self.num_agents,), jnp.nan, dtype=jnp.float32),   # Rewards (nan)
                 -jnp.ones((self.num_agents,), dtype=jnp.int32),             # Actions (-1)
                 -jnp.ones((self.num_agents,), dtype=jnp.int32),             # Observations (-1)
@@ -535,6 +615,7 @@ class StackedSignificationDecPOMDP:
             post_world_game_states,
             post_world_true_beliefs,
             post_world_estimated_beliefs,
+            post_world_second_order_estimates,
             next_agent_rewards,
             next_agent_actions,
             next_agent_observations,
@@ -564,6 +645,7 @@ class StackedSignificationDecPOMDP:
                 init["game_states"],
                 init["true_agent_belief_states"],
                 init["estimated_agent_belief_states"],
+                init["second_order_agent_belief_estimates"],
             )
 
         def continue_episode(_):
@@ -576,6 +658,7 @@ class StackedSignificationDecPOMDP:
                 post_world_game_states,
                 post_world_true_beliefs,
                 post_world_estimated_beliefs,
+                post_world_second_order_estimates,
             )
 
         (
@@ -584,6 +667,7 @@ class StackedSignificationDecPOMDP:
             next_game_states,
             next_true_beliefs,
             next_estimated_beliefs,
+            next_second_order_estimates,
         ) = jax.lax.cond(is_boundary, begin_new_episode, continue_episode, operand=None)
 
         # === 5. Advance the communication schedule ==========================
@@ -609,6 +693,7 @@ class StackedSignificationDecPOMDP:
             game_states=next_game_states,
             true_agent_belief_states=next_true_beliefs,
             estimated_agent_belief_states=next_estimated_beliefs,
+            second_order_agent_belief_estimates=next_second_order_estimates,
             last_agent_rewards=next_agent_rewards,
             last_agent_actions=next_agent_actions,
             last_agent_observations=next_agent_observations,
@@ -626,9 +711,10 @@ class StackedSignificationDecPOMDP:
     def _begin_episode(self, key, episode_index):
         """Route a fresh episode and produce its initial fields.
 
-        Assigns agents to games/roles via assignment_fn, samples each game's 
-        initial world state, and sets each agent's initial belief (and the
-        initial estimate about it, which equals its own prior) from the env params.
+        Assigns agents to games/roles via assignment_fn, samples each game's
+        initial world state, and sets each agent's initial belief, the initial estimate
+        about it, and its initial second-order estimate -- all equal to its game's
+        prior -- from the env params.
         """
         routing_key, state_key, key = jax.random.split(key, 3)
         route = self.assignment_fn(key=routing_key, episode_index=episode_index)
@@ -651,6 +737,7 @@ class StackedSignificationDecPOMDP:
 
         true_agent_belief_states = agent_initial_belief_states
         estimated_agent_belief_states = agent_initial_belief_states     # NOTE: This is also subject to change, we may want to seed priors on estimates of belief states
+        second_order_agent_belief_estimates = agent_initial_belief_states
         # Default (communicate-first) path: no act yet, so the no-act sentinels (NaN reward,
         # -1 action/observation).
         last_agent_rewards = jnp.full((self.num_agents,), jnp.nan, dtype=jnp.float32)
@@ -666,6 +753,7 @@ class StackedSignificationDecPOMDP:
                 game_states,
                 true_agent_belief_states,
                 estimated_agent_belief_states,
+                second_order_agent_belief_estimates,
                 last_agent_rewards,
                 last_agent_actions,
                 last_agent_observations,
@@ -675,6 +763,7 @@ class StackedSignificationDecPOMDP:
                 game_roles,
                 true_agent_belief_states,
                 estimated_agent_belief_states,
+                second_order_agent_belief_estimates,
             )
 
         # The act-first path advanced the underlying DecPOMDP once, so the episode starts
@@ -686,6 +775,7 @@ class StackedSignificationDecPOMDP:
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             estimated_agent_belief_states=estimated_agent_belief_states,
+            second_order_agent_belief_estimates=second_order_agent_belief_estimates,
             episode_horizon=route.underlying_env_steps_per_episode,
             underlying_env_timestep=underlying_env_timestep,
             last_agent_rewards=last_agent_rewards,
@@ -745,6 +835,7 @@ class StackedSignificationDecPOMDP:
             game_states=game_states,
             true_agent_belief_states=true_agent_belief_states,
             estimated_agent_belief_states=estimated_agent_belief_states,
+            second_order_agent_belief_estimates=init["second_order_agent_belief_estimates"],
             last_agent_rewards=last_agent_rewards,
             last_agent_actions=last_agent_actions,
             last_agent_observations=last_agent_observations,
@@ -774,12 +865,16 @@ class EnvironmentConfig:
         only_games: Names of the game types to assemble, in order -- game type index i is
             ``only_games[i]``. Empty means "every registered game" (in ``GAME_SPECS`` order).
             Names must be keys of ``envs.env_assembly.GAME_SPECS``.
+        belief_closure: How the belief updates fill in the levels above b̿_e that are not
+            tracked: "uniform" action priors, or "stationary" (each untracked level copies
+            the level two below it). See ``BeliefClosure``.
     """
 
     utterance_action_dim: int = 12  # 2 splines x 6 control points; multiple of 6 to render
     utterance_image_dim: int = 32
     skip_first_communication_step: bool = False
     only_games: Tuple[str, ...] = ()    # defaults to all games when left empty
+    belief_closure: BeliefClosure = "uniform"
 
     def build(
         self,
@@ -793,16 +888,17 @@ class EnvironmentConfig:
 
         game_names = self.only_games or tuple(GAME_SPECS.keys())
         specs = [GAME_SPECS[name] for name in game_names]
-        stacked_env_parameters, optimal_policy_bundle = assemble_environments(specs)
+        stacked_env_parameters, policy_bundle = assemble_environments(specs)
 
         return StackedSignificationDecPOMDP(
             num_agents=num_agents,
             all_env_parameters=stacked_env_parameters,
-            optimal_policy_bundle=optimal_policy_bundle,
+            policy_bundle=policy_bundle,
             assignment_fn=assignment_fn,
             communication_scheme_fn=communication_scheme_fn,
             utterance_action_dim=self.utterance_action_dim,
             skip_first_communication_step=self.skip_first_communication_step,
+            belief_closure=self.belief_closure,
         )
 
 
@@ -820,12 +916,12 @@ def a_to_b_thrice_example(key: chex.PRNGKey = jax.random.key(0)):
     from communication.communication_scheme import a_to_b_thrice_scheme_fn
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
-    stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
+    stacked_params, policy_bundle = assemble_environments([guessing_game_spec])
 
     env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policy_bundle=optimal_policy_bundle,
+        policy_bundle=policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=a_to_b_thrice_scheme_fn,
         utterance_action_dim=3,
@@ -871,12 +967,12 @@ if __name__ == "__main__":
     from envs.env_assembly import assemble_environments, guessing_game_spec
 
     # Build the stacked params + policy table from one game type (the guessing game).
-    stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
+    stacked_params, policy_bundle = assemble_environments([guessing_game_spec])
 
     env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policy_bundle=optimal_policy_bundle,
+        policy_bundle=policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -885,11 +981,12 @@ if __name__ == "__main__":
 
     # reset (communicate-first path): beliefs stay at initial.
     state, obs = env.reset(jax.random.key(0))
-    obs_beliefs, obs_estimated, obs_utterances = obs
+    obs_beliefs, obs_estimated, obs_second_order, obs_utterances = obs
     # Reset is on the utterance stage: beliefs are present, utterances NaN'd.
     assert jnp.all(jnp.isnan(obs_utterances)), "utterance-stage obs NaNs the utterances"
     assert not jnp.any(jnp.isnan(obs_beliefs)), "utterance-stage obs keeps beliefs"
     assert not jnp.any(jnp.isnan(obs_estimated)), "utterance-stage obs keeps estimated beliefs"
+    assert not jnp.any(jnp.isnan(obs_second_order)), "obs always keeps second-order estimates"
     print("=== communicate-first reset ===")
     print("game_states:        ", state.game_states)
     print("underlying_iter:    ", state.game_counters.underlying_env_timestep)
@@ -910,7 +1007,7 @@ if __name__ == "__main__":
     act_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policy_bundle=optimal_policy_bundle,
+        policy_bundle=policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -924,17 +1021,21 @@ if __name__ == "__main__":
     print("estimate about agent 0:", act_state.estimated_agent_belief_states[0])
     assert act_state.game_counters.underlying_env_timestep == 1, "act-first advances the env once at reset"
 
-    # Direct dispatch check: a belief is routed through the (game_type, role)
-    # policy. Both guessing-game roles are identity here, so each call should
-    # return its own belief back through the correct branch.
-    belief_role_0 = jnp.array([0.6, 0.3, 0.1, 0.0])
-    belief_role_1 = jnp.array([0.2, 0.2, 0.6, 0.0])
-    role_0_probs = env.optimal_policy_bundle(0, 0, distrax.Categorical(probs=belief_role_0)).probs
-    role_1_probs = env.optimal_policy_bundle(0, 1, distrax.Categorical(probs=belief_role_1)).probs
+    # Direct dispatch check: beliefs are routed through the (game_type, role) Q function
+    # and its Boltzmann policy. The presser's Q is the guessing game's presser Q; the
+    # observer's action is inert, so its policy is uniform.
+    from envs.flexible_env import boltzmann_policy
+
+    guessing_game = guessing_game_spec()
+    ego_belief = distrax.Categorical(probs=jnp.array([0.6, 0.3, 0.1, 0.0]))
+    other_belief_estimate = distrax.Categorical(probs=jnp.array([0.2, 0.2, 0.6, 0.0]))
+    role_0_probs = env.policy_bundle(0, 0, ego_belief, other_belief_estimate).probs
+    role_1_probs = env.policy_bundle(0, 1, ego_belief, other_belief_estimate).probs
     print("role 0 action probs:", role_0_probs)
     print("role 1 action probs:", role_1_probs)
-    assert jnp.allclose(role_0_probs, belief_role_0)
-    assert jnp.allclose(role_1_probs, belief_role_1)
+    expected_role_0 = boltzmann_policy(guessing_game.q_functions[0](ego_belief, other_belief_estimate), guessing_game.inverse_temperature).probs
+    assert jnp.allclose(role_0_probs, expected_role_0)
+    assert jnp.allclose(role_1_probs, 0.25)
     print("ok: env built via factory; policies dispatch by (game_type, role)")
 
     # step_env section 1: schedule decisions. Use a 3-round block (a_to_b_thrice) so
@@ -945,7 +1046,7 @@ if __name__ == "__main__":
     sched_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policy_bundle=optimal_policy_bundle,
+        policy_bundle=policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, game_type_id=0),
         communication_scheme_fn=a_to_b_thrice_scheme_fn,
         utterance_action_dim=3,
@@ -954,9 +1055,11 @@ if __name__ == "__main__":
     s0, _ = sched_env.reset(jax.random.key(2))
     utt = jnp.ones((10, sched_env.utterance_action_dim))  # every agent "says" all-ones
     num_states = s0.true_agent_belief_states.shape[-1]
-    # belief_actions are beliefs over states; the act samples actions from them, so they
-    # must be valid distributions. Use a one-hot at state 0.
-    valid_belief = jnp.zeros((10, num_states)).at[:, 0].set(1.0)
+    # belief_actions are beliefs over states the listeners adopt, so they must be valid
+    # distributions. Give them full support over the referents: a certain-but-wrong belief
+    # (e.g. a one-hot) makes the next observation impossible, and the observation update
+    # NaNs by design.
+    valid_belief = jnp.tile(jnp.array([0.5, 0.25, 0.25, 0.0]), (10, 1))
     # Post-utterance belief estimate, subject-indexed like the state field. Must be a
     # *valid* belief (full support over real states) because the act marginalizes the
     # partner's action through it; a one-hot on the padding state would make the
@@ -979,9 +1082,10 @@ if __name__ == "__main__":
 
     # get_obs: after one step we are on the belief stage, so the observation NaNs the
     # belief groups and keeps the utterances (the opposite of the reset observation).
-    ou_beliefs, ou_estimated, ou_utterances = after_utt_obs
+    ou_beliefs, ou_estimated, ou_second_order, ou_utterances = after_utt_obs
     assert jnp.all(jnp.isnan(ou_beliefs)), "belief-stage obs NaNs the beliefs"
     assert jnp.all(jnp.isnan(ou_estimated)), "belief-stage obs NaNs the estimated beliefs"
+    assert not jnp.any(jnp.isnan(ou_second_order)), "belief-stage obs keeps the second-order estimates"
     assert not jnp.any(jnp.isnan(ou_utterances[role1])), "belief-stage obs keeps the listeners' utterances"
     print("ok: belief-stage observation NaNs beliefs, keeps utterances")
 
@@ -994,12 +1098,13 @@ if __name__ == "__main__":
 
     # get_obs indexing: on the utterance stage, estimated_beliefs is the estimate of the
     # RECEIVER (partner) the sender is engaged with -- the partner's subject-indexed row.
-    us_beliefs, us_estimated, us_utterances = sched_env.get_obs(jax.random.key(0), s0)
+    us_beliefs, us_estimated, us_second_order, us_utterances = sched_env.get_obs(jax.random.key(0), s0)
     partner = s0.game_roles.partner_agent
     assert jnp.all(us_beliefs == s0.true_agent_belief_states), "beliefs[i] is agent i's own belief"
     assert jnp.all(
         us_estimated == s0.estimated_agent_belief_states[partner]
     ), "estimated_beliefs[i] is the estimate of agent i's partner (the receiver)"
+    assert jnp.all(us_second_order == s0.second_order_agent_belief_estimates), "second_order_estimates[i] is agent i's own row"
     print("ok: get_obs routes each sender the estimate of its receiver partner")
 
     # Section 2b: the estimate is subject-indexed, so the LISTENERS' rows (role 1, the agents
@@ -1066,7 +1171,7 @@ if __name__ == "__main__":
     boundary_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policy_bundle=optimal_policy_bundle,
+        policy_bundle=policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, underlying_env_steps_per_episode=2),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,
@@ -1099,7 +1204,7 @@ if __name__ == "__main__":
     act_first_env = StackedSignificationDecPOMDP(
         num_agents=10,
         all_env_parameters=stacked_params,
-        optimal_policy_bundle=optimal_policy_bundle,
+        policy_bundle=policy_bundle,
         assignment_fn=simple_assignment_fn(num_agents=10, underlying_env_steps_per_episode=2),
         communication_scheme_fn=b_to_a_scheme_fn,
         utterance_action_dim=3,

@@ -12,13 +12,22 @@ policy pair, rooted at the env's ``initial_state_distribution``:
 
 Both share the signature ``(env_spec, policies, initial_beliefs, ...)`` and return
 a per-agent tuple of expected discounted returns, so they are drop-in swappable.
+
+Policies take two beliefs, ``policy(own_belief, estimate_of_partner) -> Categorical``
+(e.g. a Boltzmann policy over a game's Q function; see ``policies_from_spec``).
+
+NOTE: Both evaluators hand each agent its partner's TRUE belief as its estimate of the
+partner (an oracle b̄_o), and update beliefs with the joint action observed. That is a
+different, more informed information structure than the stacked env, where each agent
+tracks b̄_o and b̿_e from its own observations. Rework this alongside the Monte-Carlo Q
+estimator.
 """
 
 import distrax
 import jax
 import jax.numpy as jnp
 
-from envs.flexible_env import FlexibleEnv
+from envs.flexible_env import FlexibleEnv, boltzmann_policy
 from tools.belief_representations import update_with_observation_and_joint_action
 
 
@@ -52,8 +61,8 @@ class ExactReturnEvaluator:
         Depth-limited expansion of the Bellman equation:
 
             V(s, b_ego, b_other, d) =
-                ∑_{a_ego} π_ego(a_ego | b_ego)
-                ∑_{a_other} π_other(a_other | b_other)
+                ∑_{a_ego} π_ego(a_ego | b_ego, b_other)
+                ∑_{a_other} π_other(a_other | b_other, b_ego)
                 [ ∑_{s'} T(s'|s,a) R_ego(s,a,s')
                   + γ ∑_{s'} T(s'|s,a) ∑_{o_ego,o_other} O(o|s',a)
                     · V(s', b'_ego(o_ego,a), b'_other(o_other,a), d-1) ]
@@ -64,8 +73,10 @@ class ExactReturnEvaluator:
         per pair, outside the vmap over next states.
         """
         params = self.params
-        ego_action_dist = ego_policy(ego_belief)
-        other_action_dist = other_policy(other_belief)
+        # Oracle estimates: each agent's estimate of its partner is the partner's true
+        # belief (see the module NOTE).
+        ego_action_dist = ego_policy(ego_belief, other_belief)
+        other_action_dist = other_policy(other_belief, ego_belief)
         other_agent_role = 1 - ego_agent_role
 
         def as_if_ego_acts(ego_action):
@@ -150,9 +161,10 @@ def exact_expected_returns(
     one-line change).
 
     Args:
-        env_spec: An EnvSpec ``() -> (FlexibleEnvParams, policies)``. Only its params
-            are used; ``policies`` below takes precedence.
-        policies: Per-role policies indexed [role], each Categorical(belief) -> Categorical(action).
+        env_spec: An EnvSpec ``() -> GameSpec``. Only its params are used; ``policies``
+            below takes precedence.
+        policies: Per-role policies indexed [role], each
+            (own belief, estimate of partner) -> Categorical(action).
         initial_beliefs: Per-role initial beliefs indexed [role] (distrax.Categorical).
         evaluation_depth: Bellman lookahead depth.
         discount_factor: γ.
@@ -161,7 +173,7 @@ def exact_expected_returns(
         Per-agent tuple of scalar expected discounted returns, each averaged over
         the env's ``initial_state_distribution``.
     """
-    params, _ = env_spec()
+    params = env_spec().params
     evaluator = ExactReturnEvaluator(params)
     initial_state_distribution = params.initial_state_distribution
 
@@ -204,7 +216,7 @@ def monte_carlo_returns(
     :func:`exact_expected_returns`; returns a per-agent tuple of scalar mean
     discounted returns.
     """
-    params, _ = env_spec()
+    params = env_spec().params
     env = FlexibleEnv(params)
 
     agent_0_policy, agent_1_policy = policies
@@ -221,8 +233,9 @@ def monte_carlo_returns(
             env_state, b0, b1, return_0, return_1, discount, done_before = carry
             a0_rng, a1_rng, env_rng = jax.random.split(step_rng, 3)
 
-            agent_0_action = agent_0_policy(b0).sample(seed=a0_rng)
-            agent_1_action = agent_1_policy(b1).sample(seed=a1_rng)
+            # Oracle estimates: the partner's true belief (see the module NOTE).
+            agent_0_action = agent_0_policy(b0, b1).sample(seed=a0_rng)
+            agent_1_action = agent_1_policy(b1, b0).sample(seed=a1_rng)
             joint_action = (agent_0_action, agent_1_action)
 
             next_state, (next_o0, next_o1), (r0, r1), done = env.step_env(env_rng, env_state, joint_action)
@@ -260,10 +273,21 @@ def monte_carlo_returns(
     return tuple(jnp.mean(agent_returns) for agent_returns in all_returns)
 
 
+def policies_from_spec(game_spec):
+    """Per-role Boltzmann policies ``(own belief, estimate of partner) -> Categorical``
+    over a GameSpec's Q functions, in the form the evaluators above take."""
+
+    def policy_for(q_function):
+        return lambda own_belief, estimate_of_partner: boltzmann_policy(q_function(own_belief, estimate_of_partner), game_spec.inverse_temperature)
+
+    return tuple(policy_for(q_function) for q_function in game_spec.q_functions)
+
+
 if __name__ == "__main__":
     from envs.guessing_game import guessing_game_spec
 
-    params, policies = guessing_game_spec()
+    game_spec = guessing_game_spec()
+    params, policies = game_spec.params, policies_from_spec(game_spec)
     # Both agents start from the world prior -- there is no per-role initial belief.
     beliefs = (
         distrax.Categorical(probs=params.initial_state_distribution),

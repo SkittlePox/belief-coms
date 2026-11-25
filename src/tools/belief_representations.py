@@ -6,8 +6,11 @@ may itself be traced, e.g. one game type gathered out of the stacked env_params 
 traced index. Cardinalities come from the (possibly padded) tensor shapes; padded
 states and actions carry zero probability, so they drop out of every sum.
 
-Beliefs go in and come out as ``distrax.Categorical`` over states; policies are
-``Categorical -> Categorical`` callables (see envs.flexible_env.OptimalPolicy).
+Beliefs go in and come out as ``distrax.Categorical`` over states. The updates never
+call a policy themselves: every action the ego cannot see is passed in as a
+``distrax.Categorical`` over actions, and the caller decides where it comes from (in the
+env, Boltzmann policies over Q functions; see "Where the action distributions come
+from" below).
 
 The ego frame
 -------------
@@ -33,6 +36,20 @@ values of all three:
           estimate of the ego's belief
 
 b̄_o and b̿_e are mean estimates (see the "approximation" section of the b̄_o update).
+
+Where the action distributions come from
+----------------------------------------
+Policies are Boltzmann over Q functions of TWO beliefs: an agent acts on π(· | b_own,
+b_estimate_of_partner). Predicting an action therefore needs that agent's two inputs, as
+the ego estimates them, and each prediction reaches one level higher than the agent's own:
+
+    argument                                 whose action, as predicted by   policy inputs
+    other_action_distribution                the other, by us                π_o(b̄_o, b̿_e)
+    ego_action_prior                         us, by the other                π_e(b̿_e, b⃛_o)
+    other_action_prior (second-order only)   the other, by them-modelling-us π_o(b⃛_o, b⁗_e)
+
+Only b_e, b̄_o and b̿_e are tracked, so the last two need a closure for the untracked
+levels. That choice belongs to the caller (the stacked env's ``belief_closure``).
 
 Impossible observations
 -----------------------
@@ -97,30 +114,27 @@ def update_with_observation_only(
     env_params,
     *,
     ego_belief,
-    other_belief_estimate,
     ego_observation,
     ego_action_tminus1,
-    other_policy,
+    other_action_distribution,
     ego_role,
 ):
     """Bayesian belief update when the other agent's action is unobserved.
 
-    The other agent's action is marginalized under the policy we attribute to them,
-    evaluated at our estimate of their belief:
+    The other agent's action is marginalized under the distribution we attribute to it:
 
-        b'(s') ∝ ∑_{a_other} π*(b̄)(a_other) · O_ego(o | s', a) · ∑_s T(s' | s, a) b(s)
+        b'(s') ∝ ∑_{a_other} π(a_other) · O_ego(o | s', a) · ∑_s T(s' | s, a) b(s)
 
     with a = (ego_action, a_other).
 
     Args:
         env_params: A single game's FlexibleEnvParams.
         ego_belief: The ego's current belief b(s), a distrax.Categorical.
-        other_belief_estimate: The ego's estimate of the other agent's belief b̄,
-            fed to ``other_policy``.
         ego_observation: The ego's observation at this timestep.
-        ego_action: The ego's own action at the previous timestep.
-        other_policy: π*, mapping a belief Categorical to a Categorical over the other
-            agent's actions.
+        ego_action_tminus1: The ego's own action at the previous timestep.
+        other_action_distribution: π, a Categorical over the OTHER agent's action at the
+            previous timestep, as we predict it. In the env this is their Boltzmann
+            policy at our estimates of their inputs, π_o(· | b̄_o, b̿_e).
         ego_role: The ego's id.
 
     Returns:
@@ -128,7 +142,7 @@ def update_with_observation_only(
         under the model (see the module docstring).
     """
     T, O = ego_frame(env_params, ego_role)
-    other_action_probs = other_policy(other_belief_estimate).probs  # [A_other]
+    other_action_probs = other_action_distribution.probs  # [A_other]
 
     predicted = jnp.einsum("s,sxt->xt", ego_belief.probs, T[:, ego_action_tminus1])  # [A_other, S']
     likelihood = O[:, ego_action_tminus1, :, ego_observation, :].sum(-1).T  # [A_other, S']
@@ -222,8 +236,9 @@ def update_other_belief_estimate_with_observation_only(
     For each action the other agent may have taken, a_other (a = (a_ego, a_other)):
 
       1. Their action distribution is given by the caller:
-         π(a_other) = other_action_distribution(a_other). Typically it is their policy
-         applied to b̄, since their behaviour last timestep was a function of their belief.
+         π(a_other) = other_action_distribution(a_other). Typically it is their Boltzmann
+         policy at our estimates of their inputs, π_o(· | b̄_o, b̿_e), since their
+         behaviour last timestep was a function of their belief and their estimate of ours.
 
       2. OUR side. We know our own action, so we condition on it: predict forward from
          our own belief under the joint action (a_ego, a_other).
@@ -245,9 +260,9 @@ def update_other_belief_estimate_with_observation_only(
              pred_h(s')   = ∑_s T(s' | s, h, a_other) b̄(s)
              b_{a,o}(s')  ∝ ∑_h P(h) · pred_h(s') · O_other(o_other | s', h, a_other)
 
-         P(h) is ``ego_action_prior``: what THEY think we did. It comes from a
-         second-order estimate (what we estimate they believe we believe), which is
-         calculated outside this function.
+         P(h) is ``ego_action_prior``: what THEY think we did, i.e. our policy at
+         their estimates of our inputs, π_e(· | b̿_e, b⃛_o). It is calculated outside
+         this function (see "Where the action distributions come from" above).
 
       5. Average over everything we cannot see:
 
@@ -272,8 +287,8 @@ def update_other_belief_estimate_with_observation_only(
 
       - It cannot represent "they are certain, but I don't know of what". That looks
         like a spread-out b̄, indistinguishable from "they are confused".
-      - When the caller derives the step-1 action distribution from b̄, an error in b̄
-        biases the action likelihood, which biases the next b̄.
+      - When the caller derives the step-1 action distribution from b̄ (and b̿_e), an
+        error in either biases the action likelihood, which biases the next b̄.
 
     Args:
         env_params: A single game's FlexibleEnvParams.
@@ -288,10 +303,10 @@ def update_other_belief_estimate_with_observation_only(
             previous timestep (the unobserved a_other in step 1).
         ego_role: The ego's id.
         ego_action_prior: P(h), a Categorical over OUR action at the previous timestep,
-            as the OTHER agent predicts it (step 4). Required, with no default. It should
-            come from a second-order belief estimate (what we estimate they believe we
-            believe), calculated outside this function, e.g. our policy applied to the
-            b̿_e from ``update_second_order_ego_estimate_with_observation_only``.
+            as the OTHER agent predicts it (step 4). Required, with no default. In the
+            env it is our Boltzmann policy at their estimates of our inputs,
+            π_e(· | b̿_e, b⃛_o), with the untracked b⃛_o closed by the env's
+            ``belief_closure``.
 
     Returns:
         b̄' as a distrax.Categorical. All NaN if every branch has zero weight, i.e.
@@ -420,7 +435,8 @@ def update_second_order_ego_estimate_with_observation_only(
     The approximation
     -----------------
     Every plug-in is a mean: b̄_o stands in for their belief, b̿_e for their estimate of
-    us, and the action distributions are policies applied to means. The errors of the
+    us, and the action distributions are policies applied to means (or closures, for
+    the untracked levels). The errors of the
     first-order update (see its docstring) therefore apply twice, and b̿_e is cruder
     than b̄_o.
 
@@ -434,14 +450,15 @@ def update_second_order_ego_estimate_with_observation_only(
         ego_observation: The ego's observation at this timestep.
         ego_action: The ego's own action at the previous timestep.
         other_action_distribution: A Categorical over the OTHER agent's action at the
-            previous timestep, as WE predict it (e.g. their policy applied to b̄_o).
+            previous timestep, as WE predict it (e.g. π_o(· | b̄_o, b̿_e)).
         ego_role: The ego's id.
         ego_action_prior: A Categorical over OUR action at the previous timestep, as THEY
-            predict it (e.g. our policy applied to b̿_e). The same quantity is the
-            first-order update's ``ego_action_prior``.
+            predict it (e.g. π_e(· | b̿_e, b⃛_o)). The same quantity is the first-order
+            update's ``ego_action_prior``.
         other_action_prior: A Categorical over THEIR action at the previous timestep, as
-            they think WE predict it. It would come from a third-order estimate; until
-            one exists, callers pass a uniform distribution explicitly.
+            they think WE predict it, π_o(· | b⃛_o, b⁗_e). Both inputs are beyond the
+            tracked levels, so the caller supplies a closure (the env's
+            ``belief_closure``).
 
     Returns:
         b̿_e' as a distrax.Categorical. All NaN if every branch has zero weight (o_ego

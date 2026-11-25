@@ -73,10 +73,13 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
     """
     belief_train_states, utterance_train_states, env_state, last_obs, rng = carry
     # last_obs is get_obs(state) from the PREVIOUS step: (beliefs, estimated_beliefs,
-    # utterances), each [num_agents, ...]. On the belief stage the belief group is NaN'd
-    # and on the utterance stage the utterances are NaN'd -- see get_obs. We only feed the
-    # gathered partner quantities from here; the own belief we read from the state directly.
-    _obs_beliefs, obs_partner_estimates, obs_partner_utterances = last_obs
+    # second_order_estimates, utterances), each [num_agents, ...]. On the belief stage the
+    # belief group is NaN'd and on the utterance stage the utterances are NaN'd -- see
+    # get_obs. We only feed the gathered partner quantities from here; the own belief we
+    # read from the state directly.
+    # NOTE: second-order estimates (b̿_e) are not consumed yet; the speaker and listener
+    # models will take them as inputs.
+    _obs_beliefs, obs_partner_estimates, _obs_second_order_estimates, obs_partner_utterances = last_obs
 
     rng, utt_rng, bel_rng, render_rng, step_rng = jax.random.split(rng, 5)
 

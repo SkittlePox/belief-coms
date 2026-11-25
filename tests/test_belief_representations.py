@@ -15,11 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from envs.flexible_env import FlexibleEnvParams
-from envs.guessing_game import (
-    guessing_game_spec,
-    role_0_optimal_policy,
-    role_1_optimal_policy,
-)
+from envs.guessing_game import guessing_game_spec
 from tools.belief_representations import (
     initial_belief,
     initial_other_belief_estimate,
@@ -33,6 +29,11 @@ from tools.belief_representations import (
 
 # The guessing game has 4 actions (3 buttons and wait).
 UNIFORM_ACTIONS = distrax.Categorical(probs=jnp.ones(4) / 4)
+# A presser pressing each button 0-2 with probability 1/3 and never waiting. The belief
+# updates take action distributions as given, so the worked examples fix this one by hand
+# rather than deriving it from a policy. (The observer's action is inert in the guessing
+# game, so any distribution over it gives the same updates; UNIFORM_ACTIONS is used.)
+PRESS_EACH_BUTTON = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
 
 
 def test_update_with_observation_only_worked_example():
@@ -41,7 +42,7 @@ def test_update_with_observation_only_worked_example():
     Guessing game. States 0-2 are referents, state 3 is "done". Agent 1 (the observer)
     starts uniform over the referents, waits (its action is inert), and sees symbol 1.
     It never sees agent 0's action, so it marginalizes over it: agent 0's policy on a
-    uniform belief presses each button 0-2 with probability 1/3.
+    uniform belief is taken to press each button 0-2 with probability 1/3.
 
     1. Predict -- sum over agent 0's possible presses k of (1/3) · T(s' | s, k):
        from referent s, pressing k == s ends the game (s -> done) and k != s leaves s
@@ -64,20 +65,16 @@ def test_update_with_observation_only_worked_example():
     ruled out too: agent 0 might well have ended the game, but then agent 1 would have
     seen the done symbol instead.
     """
-    env_params, _ = guessing_game_spec()
+    env_params = guessing_game_spec().params
     uniform_referent = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
     wait = 3
-
-    # Sanity-check the premise: agent 0 presses each button with probability 1/3.
-    np.testing.assert_allclose(role_0_optimal_policy(uniform_referent).probs, [1 / 3, 1 / 3, 1 / 3, 0.0], atol=1e-6)
 
     updated = update_with_observation_only(
         env_params,
         ego_belief=uniform_referent,  # agent 1's own belief
-        other_belief_estimate=uniform_referent,  # agent 1's estimate of agent 0's belief
         ego_observation=1,  # agent 1 saw symbol 1
         ego_action_tminus1=wait,  # agent 1 waited
-        other_policy=role_0_optimal_policy,  # how agent 1 thinks agent 0 acts
+        other_action_distribution=PRESS_EACH_BUTTON,  # how agent 1 thinks agent 0 acted
         ego_role=1,
     )
 
@@ -111,7 +108,7 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
     modeled agent-1 posterior wrongly assigns state 0 probability 0. The estimate then
     excludes a state the real agent 1 believes with probability 0.5.
     """
-    params, _ = guessing_game_spec()
+    params = guessing_game_spec().params
 
     # Uniform prior over the three referent states {0, 1, 2} (state 3 is terminal).
     uniform_referent = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
@@ -122,7 +119,7 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
         other_belief_estimate=uniform_referent,  # ego's prior estimate of agent 1
         ego_observation=0,  # agent 0 saw referent symbol 0
         ego_action=0,  # agent 0 pressed button 0
-        other_action_distribution=role_1_optimal_policy(uniform_referent),  # agent 1's actions
+        other_action_distribution=UNIFORM_ACTIONS,  # agent 1's actions (inert)
         ego_role=0,
         ego_action_prior=UNIFORM_ACTIONS,  # what agent 1 assumes agent 0 did
     )
@@ -133,10 +130,9 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
     agent1_true_belief = update_with_observation_only(
         params,
         ego_belief=uniform_referent,  # agent 1's own prior
-        other_belief_estimate=uniform_referent,  # agent 1's estimate of agent 0
         ego_observation=1,  # agent 1 saw symbol 1
         ego_action_tminus1=3,  # agent 1's own action (wait)
-        other_policy=role_0_optimal_policy,  # agent 0's policy, marginalized over by agent 1
+        other_action_distribution=PRESS_EACH_BUTTON,  # agent 0's action, marginalized over by agent 1
         ego_role=1,
     )
 
@@ -164,12 +160,12 @@ def test_ego_belief_is_mandatory():
     ego's belief is the only channel by which the ego's private knowledge reaches the
     estimate, so it is now required.
     """
-    params, policies = guessing_game_spec()
+    params = guessing_game_spec().params
     uniform_referent = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
     rest = dict(
         ego_observation=0,
         ego_action=0,
-        other_action_distribution=policies[1](uniform_referent),
+        other_action_distribution=UNIFORM_ACTIONS,
         ego_role=0,
         ego_action_prior=UNIFORM_ACTIONS,
     )
@@ -190,7 +186,7 @@ def test_the_reset_observation_beats_the_prior():
     believe. Using it moves the estimate off the prior, and that movement is information,
     not noise. This is the trap in "just start everyone at the prior".
     """
-    params, _ = guessing_game_spec()
+    params = guessing_game_spec().params
 
     blind = np.asarray(params.initial_state_distribution)  # the best you can do UNOBSERVED
     looking = np.asarray(initial_other_belief_estimate(params, jnp.array(1), ego_role=0).probs)
@@ -225,7 +221,7 @@ def test_initial_second_order_ego_estimate_worked_example():
     Averaging the two: [3/8, 1/4, 3/8, 0]. Our own belief is [1/2, 0, 1/2, 0], but we
     expect them to think we still hold state 1 at 1/4 -- they never saw our symbol.
     """
-    params, _ = guessing_game_spec()
+    params = guessing_game_spec().params
 
     # Premise: their estimate of us, for each of the two observations they could have had.
     np.testing.assert_allclose(initial_other_belief_estimate(params, 2, ego_role=1).probs, [1 / 4, 1 / 4, 1 / 2, 0], atol=1e-6)
@@ -244,7 +240,7 @@ def test_impossible_observations_produce_nan():
     be silently replaced by some finite fallback. (The exact-returns evaluator enumerates
     impossible observation pairs by design and handles the NaN itself.)
     """
-    params, _ = guessing_game_spec()
+    params = guessing_game_spec().params
     certain_of_0 = distrax.Categorical(probs=jnp.array([1.0, 0.0, 0.0, 0.0]))
     wait = int(params.num_actions) - 1
 
@@ -254,10 +250,9 @@ def test_impossible_observations_produce_nan():
     updated = update_with_observation_only(
         params,
         ego_belief=certain_of_0,
-        other_belief_estimate=certain_of_0,
         ego_observation=0,
         ego_action_tminus1=wait,
-        other_policy=role_1_optimal_policy,
+        other_action_distribution=UNIFORM_ACTIONS,
         ego_role=0,
     )
     assert np.all(np.isnan(updated.probs))
@@ -268,7 +263,7 @@ def test_impossible_observations_produce_nan():
         other_belief_estimate=certain_of_0,
         ego_observation=0,
         ego_action=wait,
-        other_action_distribution=role_1_optimal_policy(certain_of_0),
+        other_action_distribution=UNIFORM_ACTIONS,
         ego_role=0,
         ego_action_prior=UNIFORM_ACTIONS,
     )
@@ -281,7 +276,7 @@ def test_impossible_observations_produce_nan():
         second_order_ego_estimate=certain_of_0,
         ego_observation=0,
         ego_action=wait,
-        other_action_distribution=role_1_optimal_policy(certain_of_0),
+        other_action_distribution=UNIFORM_ACTIONS,
         ego_role=0,
         ego_action_prior=UNIFORM_ACTIONS,
         other_action_prior=UNIFORM_ACTIONS,
@@ -307,7 +302,7 @@ def test_contradictory_estimates_produce_nan():
     the other branch alone. The estimates are inconsistent with each other, so the update
     must return NaN instead.
     """
-    params, _ = guessing_game_spec()
+    params = guessing_game_spec().params
     uniform_referent = distrax.Categorical(probs=jnp.array([1 / 3, 1 / 3, 1 / 3, 0.0]))
     certain_of_2 = distrax.Categorical(probs=jnp.array([0.0, 0.0, 1.0, 0.0]))
     wait = int(params.num_actions) - 1
@@ -318,7 +313,7 @@ def test_contradictory_estimates_produce_nan():
         other_belief_estimate=certain_of_2,  # ...but think they are certain of state 2
         ego_observation=1,
         ego_action=wait,
-        other_action_distribution=role_1_optimal_policy(certain_of_2),
+        other_action_distribution=UNIFORM_ACTIONS,
         ego_role=0,
         ego_action_prior=UNIFORM_ACTIONS,
     )
@@ -349,8 +344,7 @@ class RandomCase:
     T: np.ndarray  # T[s, a0, a1, s']            (agent order)
     O_joint: np.ndarray  # O[s', a0, a1, o0, o1]  (agent order)
     prior: np.ndarray  # P0[s]
-    policy: object  # Categorical -> Categorical, used by the code under test
-    policy_probs: object  # the same policy on a numpy probs vector, used by the reference
+    policy_probs: object  # a fixed nonlinear belief -> action-probs map on numpy vectors
     ego_belief: np.ndarray
     other_belief_estimate: np.ndarray
     ego_observation: int
@@ -394,9 +388,6 @@ def _random_case(seed, ego_role, traced):
     )
     W = rng.normal(size=(S, A))  # a fixed nonlinear belief -> action-probs map
 
-    def policy(belief):
-        return distrax.Categorical(logits=jnp.log(belief.probs + 1e-9) @ W)
-
     def policy_probs(belief_probs):
         z = np.exp(np.log(belief_probs + 1e-9) @ W)
         return z / z.sum()
@@ -407,7 +398,6 @@ def _random_case(seed, ego_role, traced):
         T=T,
         O_joint=O_joint,
         prior=prior,
-        policy=policy,
         policy_probs=policy_probs,
         ego_belief=_random_simplex(rng, S),
         other_belief_estimate=_random_simplex(rng, S),
@@ -549,10 +539,10 @@ def test_update_with_observation_and_joint_action_matches_reference(seed, ego_ro
 
 @pytest.mark.parametrize("seed, ego_role, traced", RANDOM_CASES, ids=RANDOM_CASE_IDS)
 def test_update_with_observation_only_matches_reference(seed, ego_role, traced):
-    """b'(s') ∝ ∑_{a_other} π*(b̄)(a_other) · O_ego(o | s', a) · ∑_s T(s' | s, a) b(s),
+    """b'(s') ∝ ∑_{a_other} π(a_other) · O_ego(o | s', a) · ∑_s T(s' | s, a) b(s),
     with a = (ego_action, a_other)."""
     c = _random_case(seed, ego_role, traced)
-    other_action_probs = c.policy_probs(c.other_belief_estimate)  # π*(b̄)
+    other_action_probs = c.policy_probs(c.other_belief_estimate)  # π, passed in as given
 
     want = np.zeros(S)
     for other_action in range(A):
@@ -568,10 +558,9 @@ def test_update_with_observation_only_matches_reference(seed, ego_role, traced):
         lambda ego_role: update_with_observation_only(
             c.env_params,
             ego_belief=distrax.Categorical(probs=jnp.array(c.ego_belief)),
-            other_belief_estimate=distrax.Categorical(probs=jnp.array(c.other_belief_estimate)),
             ego_observation=c.ego_observation,
             ego_action_tminus1=c.ego_action,
-            other_policy=c.policy,
+            other_action_distribution=distrax.Categorical(probs=jnp.array(other_action_probs)),
             ego_role=ego_role,
         )
     )

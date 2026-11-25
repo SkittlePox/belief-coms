@@ -26,7 +26,8 @@ through or delete them as they're resolved.
 
 ## Headline
 
-- Tests pass (129 as of 2026-11-16: 119 belief-function, 7 stacked env, 3 GAE).
+- Tests pass (161 as of 2026-11-25: 119 belief-function, 11 stacked env, 28 Q policies,
+  3 GAE).
 - Training **runs end to end but does not train**:
   - the belief population's losses are NaN from the first iteration (B1);
   - env beliefs go NaN within a few acts at initialization, so from the second iteration
@@ -36,8 +37,9 @@ through or delete them as they're resolved.
 
   Nothing in the test suite covers the agents, the rollout or the PPO update, and the
   GAE tests use no NaN rewards. That is why none of this was caught.
-- The belief machinery has one estimate slot per agent. Second-order estimate functions
-  exist but are not wired into the env (G1, G2).
+- Policies are Boltzmann over hand-specified Q functions of two beliefs, Q(b_e, b̄_o, a)
+  (see "Q-function policies" under `envs`). The env tracks three levels per agent, b_e,
+  b̄_o and b̿_e (G1, G2), but communication moves none of the estimates yet (G3).
 - No wandb logging (G5). The only environment is the guessing game, which is a weak test
   of communication (D4).
 
@@ -186,7 +188,9 @@ intended: it is reporting two real problems, not a belief-function bug.
   used to fall back to the unchanged b̄ and now NaNs. It fires whenever π*(b̄) gives zero
   probability to every partner action consistent with `o_ego`. That is a wrong estimate,
   not an env bug — exactly the caveat the deleted NOTE recorded. With probability-matching
-  π* on a sharp, wrong b̄, this is easy to hit.
+  π* on a sharp, wrong b̄, this is easy to hit. (2026-11-25: policies are now Boltzmann,
+  which gives every real action positive probability, so this particular trigger is gone.
+  The B5 measurements above predate that and have not been re-run.)
 - **Consequence.** NaN beliefs flow into agent inputs: in a 64-stage seed-2 rollout, 8 of
   320 agent-stage rows already have NaN inputs, log-probs and values. In training, both
   populations' `advantage_mean` is NaN from the second iteration on, under `a_to_b`.
@@ -199,9 +203,12 @@ Fixing it is a decision, not a patch:
   or a modelled event. If the latter, it calls for a model change rather than a fallback,
   e.g. mixing π*(b̄) with ε-uniform as a noise model of the partner.
 
-**G1. No second-order estimate in the env.** State holds `true_agent_belief_states` and one
-`estimated_agent_belief_states` per agent. There is no slot for "what my partner thinks I
-believe" (or deeper). See D1 for what it would feed; G2 has the functions that compute it.
+**G1. ~~No second-order estimate in the env~~** — done 2026-11-25. State now also holds
+`second_order_agent_belief_estimates` (row i: agent i's estimate of its partner's estimate
+of agent i, held by and about agent i), seeded from the prior, updated at every act, and
+returned by `get_obs` as the third of `(beliefs, estimated_beliefs, second_order_estimates,
+utterances)`. It is never NaN'd by stage; the rollout unpacks it but no agent consumes it
+yet.
 
 **G3. Communication never moves the estimates.**
 - The speaker's post-utterance estimate of the listener is a passthrough in the rollout
@@ -209,6 +216,8 @@ believe" (or deeper). See D1 for what it would feed; G2 has the functions that c
   [rollout.py](../src/training/rollout.py)), so it never changes during communication.
 - The listener never updates its estimate of the *speaker* after hearing an utterance, even
   though the utterance is evidence about the speaker's belief.
+- b̿_e does not move during communication at all (TODO in `step_env` section 2d, to be
+  re-designed next). A stale b̿_e biases every partner prediction π_o(b̄_o, b̿_e) at the act.
 
 **D1. Reset observations.** The stacked env emits no reset observation; beliefs and
 estimates start at the prior. `belief_representations` argues this is a significant
@@ -217,6 +226,8 @@ nothing in the env uses (only tests). Either emit reset observations or drop the
 
 **D2. Who owns "what an agent sees"?** `get_obs` NaNs own beliefs on the belief stage, but
 the rollout reads own beliefs straight from `env_state` anyway, so the masking is half-used.
+(Second-order estimates are deliberately never NaN'd: the listener needs them on the belief
+stage.)
 Relatedly, the listener adopts `belief_action` *verbatim* as its new true belief, so it can
 overwrite private information it had; whether that's intended (the network must learn to
 preserve it) or should be structural (D3's likelihood action) is a decision. Now concrete:
@@ -246,10 +257,10 @@ covered into `tests/` and delete the rest.
 
 ## `envs`
 
-**D4. The guessing game is a weak test of communication.** Role 1's action is inert; the
-presser can solve it alone by waiting (~3 waits on average); and the "optimal" policies are
-probability matching, so the presser never waits (`P(wait) = b(done) = 0`) — any history
-in which the presser waits is off-policy for a partner modeling it. Candidate envs:
+**D4. The guessing game is a weak test of communication.** Role 1's action is inert, and
+the presser can solve it alone by waiting (~3 waits on average). (The old
+probability-matching policies never waited; the Q-based presser now waits on the prior,
+P(wait) ≈ 0.89 at β = 10.) Candidate envs:
 - **Lewis signaling game:** the observer sees the state, the presser sees nothing.
   Communication is necessary; the cleanest "can this train at all" check.
 - **Joint action:** both agents' actions matter (e.g. both must press the same button, each
@@ -263,9 +274,31 @@ index `transition` / `observation` / `reward` independently. `FlexibleEnv` claim
 `get_obs` also always queries with action `(0, 0)`, so it would be wrong for any env with
 action-dependent observations (the stacked env does pass the real action).
 
-**T8. Brittle builders.** `build_reward_tensor` hardcodes `[-1, -1, -1, -0.1]`, so it only
-works for `num_actions == 4`. Stale `# [num_roles, S]` comment in `_pad_params`
+**T8. Brittle builders.** `build_reward_tensor` hardcodes four rewards (now from the
+`CORRECT_PRESS_REWARD` / `WRONG_PRESS_REWARD` / `WAIT_REWARD` constants the presser Q also
+reads), so it only works for `num_actions == 4`; `guessing_game_spec` now refuses any other
+size, since the Q functions are derived for 3 referents. Stale `# [num_roles, S]` comment in `_pad_params`
 ([env_assembly.py](../src/envs/env_assembly.py)).
+
+**Q-function policies (2026-11-25).** Policies used to be `Categorical -> Categorical`
+functions of the actor's own belief. They are now Boltzmann over Q functions of two beliefs:
+
+- `envs.flexible_env`: `QFunction = (b_e, b̄_o) -> [A]` values (-inf = unavailable),
+  `boltzmann_policy(q, β)` (padded -inf actions get probability 0 at every β), and
+  `GameSpec(params, q_functions, inverse_temperature)`, which every EnvSpec now returns.
+- `envs.env_assembly`: `BoltzmannPolicyBundle`, called as
+  `policy_bundle(game_type, role, b_e, b̄_o) -> Categorical`, with `.q_values(...)` for the raw
+  values. It pads each game's Q to the common action count with -inf. β is per game type.
+- `envs.guessing_game`: `presser_q_function(γ)` is the exact infinite-horizon optimal Q
+  (closed form, derived in its docstring, checked against a brute-force Bellman lookahead
+  over the real tensors in `tests/test_q_policies.py`). It ignores b̄_o, because the
+  observer is inert in T, O and R. `observer_q_function` is constant, so the observer acts
+  uniformly. Defaults: γ = 0.9, β = 10. Both Q functions return NaN for a NaN belief.
+- Stacked env: an agent acts on π(b_e, b̄_o) and predicts its partner's unseen action as
+  π_o(b̄_o, b̿_e). The two predictions that need levels above b̿_e go through
+  `EnvironmentConfig.belief_closure` (`--environment.belief-closure`): `uniform` (default;
+  uniform action priors) or `stationary` (each untracked level copies the level two below
+  it: b⃛_o := b̄_o, b⁗_e := b̿_e).
 
 ---
 
@@ -283,9 +316,10 @@ Claude refactored [belief_representations.py](../src/tools/belief_representation
   `initial_belief`, `initial_other_belief_estimate`,
   `update_other_belief_estimate_with_observation_only`. The two observation-only updates
   take keyword-only arguments (`ego_belief=`, `other_belief_estimate=`, `ego_observation=`,
-  `ego_role=`, plus `ego_action_tminus1=` / `ego_action=` — see T9). The ego update takes
-  `other_policy=`; the estimate update takes `other_action_distribution=` instead, a
-  Categorical over the other agent's action, so a value-based policy can supply it.
+  `ego_role=`, plus `ego_action_tminus1=` / `ego_action=` — see T9). Since 2026-11-25 all
+  three observation-only updates take `other_action_distribution=`, a Categorical over the
+  other agent's action; none of them calls a policy (the ego update used to take
+  `other_policy=`).
 - **Traceable params.** The functions read cardinalities from tensor shapes, never
   `int(env_params.num_states)`, so `env_params` can be traced. The stacked env gathers one
   game type's params with a traced `game_type` index; the per-type `_belief_factories` tuple
@@ -320,23 +354,23 @@ Claude refactored [belief_representations.py](../src/tools/belief_representation
 
 What's left over from it is in T9.
 
-**G2. Second-order estimate: functions done, not wired in.** (2026-11-16) The memo-based
+**G2. Second-order estimate: functions done, wired in 2026-11-25** (see G1 and "Q-function
+policies"). (2026-11-16) The memo-based
 `nested_belief.py` was deleted (memo is not to be used) and replaced by hand-written JAX in
 `belief_representations`: `initial_second_order_ego_estimate` and
 `update_second_order_ego_estimate_with_observation_only`, which updates b̿_e (our estimate of
 their estimate of our belief). It reuses the first-order branch weights
 (`_branch_weights`) and, in each branch, runs the first-order estimate update from the
-other agent's seat. The first-order update's `ego_action_prior` should then be our policy
-applied to b̿_e. The second-order update needs a third-order `other_action_prior` (their
-action, as they think we predict it), which callers pass as uniform for now. Not yet done:
-a third `[num_agents, S]` slot in the env state, seeding it at reset, and switching the
-env's uniform `ego_action_prior` to `ego_policy(b̿_e)`.
+other agent's seat. With two-belief policies, `ego_action_prior` is π_e(b̿_e, b⃛_o) and
+`other_action_prior` is π_o(b⃛_o, b⁗_e); both reach above the tracked levels, so the env
+fills them in according to `belief_closure`. The reset-observation initializers
+(`initial_second_order_ego_estimate` etc.) are still unused by the env (D1).
 
 **T9. `belief_representations` leftovers** (after the refactor above).
 - `if ego_belief is None: raise` is near-dead now that `ego_belief` is keyword-only with no
   default.
-- **Stale docstring:** `update_with_observation_only`'s Args still documents `ego_action`,
-  but the parameter is now `ego_action_tminus1`.
+- ~~**Stale docstring:** `update_with_observation_only`'s Args documented `ego_action`~~ —
+  fixed 2026-11-25.
 - **Naming asymmetry:** `update_with_observation_only` takes `ego_action_tminus1`, while
   `update_other_belief_estimate_with_observation_only` takes `ego_action` for the same
   quantity (the ego's previous action). `_agent_belief_updates` passes the same `action` to
@@ -350,7 +384,11 @@ env's uniform `ego_action_prior` to `ego_policy(b̿_e)`.
 - ~~NaN-vs-fallback in the estimate functions~~ — decided 2026-11-12: NaN everywhere (but
   see B5).
 
-**T10. `returns.py` is unused.** Only its own `__main__` calls it. Its Monte-Carlo estimator
+**T10. `returns.py` is unused.** Only its own `__main__` calls it. Since 2026-11-25 its
+policies take `(own belief, estimate of partner)`, and both evaluators feed each agent its
+partner's TRUE belief as that estimate (an oracle b̄_o; NOTE in the module docstring);
+`policies_from_spec` builds Boltzmann policies from a `GameSpec`. To be reworked with the
+Monte-Carlo Q estimator. Its Monte-Carlo estimator
 also uses `update_with_observation_and_joint_action` (joint action observed) and ignores the
 reset observation — a different information structure from the stacked env. Move to an
 `analysis/` folder or delete. If deleted, `FlexibleEnv` (T7) loses its last real user.

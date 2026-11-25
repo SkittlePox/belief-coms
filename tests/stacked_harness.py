@@ -116,17 +116,19 @@ class Harness:
         utterance_action_dim: int = 3,
         assignment_fn: Callable | None = None,
         estimate_mode: EstimateMode = "oracle",
+        belief_closure: str = "uniform",
     ) -> "Harness":
         """A small guessing-game env. ``scheme`` is a scheme name or a CommunicationSchemeFn."""
-        stacked_params, optimal_policy_bundle = assemble_environments([guessing_game_spec])
+        stacked_params, policy_bundle = assemble_environments([guessing_game_spec])
         env = StackedSignificationDecPOMDP(
             num_agents=num_agents,
             all_env_parameters=stacked_params,
-            optimal_policy_bundle=optimal_policy_bundle,
+            policy_bundle=policy_bundle,
             assignment_fn=assignment_fn or fixed_pairs_assignment_fn(num_agents=num_agents, underlying_env_steps_per_episode=horizon),
             communication_scheme_fn=get_scheme_fn(scheme) if isinstance(scheme, str) else scheme,
             utterance_action_dim=utterance_action_dim,
             skip_first_communication_step=act_first,
+            belief_closure=belief_closure,
         )
         return cls(env, estimate_mode)
 
