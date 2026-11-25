@@ -74,7 +74,7 @@ def test_update_with_observation_only_worked_example():
         ego_belief=uniform_referent,  # agent 1's own belief
         ego_observation=1,  # agent 1 saw symbol 1
         ego_action_tminus1=wait,  # agent 1 waited
-        other_action_distribution=PRESS_EACH_BUTTON,  # how agent 1 thinks agent 0 acted
+        other_action_as_we_predict=PRESS_EACH_BUTTON,  # how agent 1 thinks agent 0 acted
         ego_role=1,
     )
 
@@ -119,9 +119,9 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
         other_belief_estimate=uniform_referent,  # ego's prior estimate of agent 1
         ego_observation=0,  # agent 0 saw referent symbol 0
         ego_action=0,  # agent 0 pressed button 0
-        other_action_distribution=UNIFORM_ACTIONS,  # agent 1's actions (inert)
+        other_action_as_we_predict=UNIFORM_ACTIONS,  # agent 1's actions (inert)
         ego_role=0,
-        ego_action_prior=UNIFORM_ACTIONS,  # what agent 1 assumes agent 0 did
+        ego_action_as_they_predict=UNIFORM_ACTIONS,  # what agent 1 assumes agent 0 did
     )
 
     # Reference: agent 1's ACTUAL belief had it seen symbol 1 (the observation it in fact
@@ -132,7 +132,7 @@ def test_other_belief_estimate_keeps_states_the_partner_cannot_rule_out():
         ego_belief=uniform_referent,  # agent 1's own prior
         ego_observation=1,  # agent 1 saw symbol 1
         ego_action_tminus1=3,  # agent 1's own action (wait)
-        other_action_distribution=PRESS_EACH_BUTTON,  # agent 0's action, marginalized over by agent 1
+        other_action_as_we_predict=PRESS_EACH_BUTTON,  # agent 0's action, marginalized over by agent 1
         ego_role=1,
     )
 
@@ -165,9 +165,9 @@ def test_ego_belief_is_mandatory():
     rest = dict(
         ego_observation=0,
         ego_action=0,
-        other_action_distribution=UNIFORM_ACTIONS,
+        other_action_as_we_predict=UNIFORM_ACTIONS,
         ego_role=0,
-        ego_action_prior=UNIFORM_ACTIONS,
+        ego_action_as_they_predict=UNIFORM_ACTIONS,
     )
 
     with pytest.raises(TypeError):  # missing keyword-only argument
@@ -252,7 +252,7 @@ def test_impossible_observations_produce_nan():
         ego_belief=certain_of_0,
         ego_observation=0,
         ego_action_tminus1=wait,
-        other_action_distribution=UNIFORM_ACTIONS,
+        other_action_as_we_predict=UNIFORM_ACTIONS,
         ego_role=0,
     )
     assert np.all(np.isnan(updated.probs))
@@ -263,9 +263,9 @@ def test_impossible_observations_produce_nan():
         other_belief_estimate=certain_of_0,
         ego_observation=0,
         ego_action=wait,
-        other_action_distribution=UNIFORM_ACTIONS,
+        other_action_as_we_predict=UNIFORM_ACTIONS,
         ego_role=0,
-        ego_action_prior=UNIFORM_ACTIONS,
+        ego_action_as_they_predict=UNIFORM_ACTIONS,
     )
     assert np.all(np.isnan(estimate.probs))
 
@@ -276,10 +276,10 @@ def test_impossible_observations_produce_nan():
         second_order_ego_estimate=certain_of_0,
         ego_observation=0,
         ego_action=wait,
-        other_action_distribution=UNIFORM_ACTIONS,
+        other_action_as_we_predict=UNIFORM_ACTIONS,
         ego_role=0,
-        ego_action_prior=UNIFORM_ACTIONS,
-        other_action_prior=UNIFORM_ACTIONS,
+        ego_action_as_they_predict=UNIFORM_ACTIONS,
+        other_action_as_they_think_we_predict=UNIFORM_ACTIONS,
     )
     assert np.all(np.isnan(second_order.probs))
 
@@ -313,9 +313,9 @@ def test_contradictory_estimates_produce_nan():
         other_belief_estimate=certain_of_2,  # ...but think they are certain of state 2
         ego_observation=1,
         ego_action=wait,
-        other_action_distribution=UNIFORM_ACTIONS,
+        other_action_as_we_predict=UNIFORM_ACTIONS,
         ego_role=0,
-        ego_action_prior=UNIFORM_ACTIONS,
+        ego_action_as_they_predict=UNIFORM_ACTIONS,
     )
     assert np.all(np.isnan(estimate.probs))
 
@@ -350,9 +350,9 @@ class RandomCase:
     ego_observation: int
     ego_action: int
     other_action: int
-    ego_action_prior: np.ndarray
+    ego_action_as_they_predict: np.ndarray
     second_order_ego_estimate: np.ndarray
-    other_action_prior: np.ndarray
+    other_action_as_they_think_we_predict: np.ndarray
     ego_role: int
     traced: bool
 
@@ -404,10 +404,10 @@ def _random_case(seed, ego_role, traced):
         ego_observation=ego_observation,
         ego_action=ego_action,
         other_action=other_action,
-        ego_action_prior=_random_simplex(rng, A),
+        ego_action_as_they_predict=_random_simplex(rng, A),
         # Drawn last, so the earlier fields are unchanged by their addition.
         second_order_ego_estimate=_random_simplex(rng, S),
-        other_action_prior=_random_simplex(rng, A),
+        other_action_as_they_think_we_predict=_random_simplex(rng, A),
         ego_role=ego_role,
         traced=traced,
     )
@@ -470,7 +470,7 @@ def _reference_branch_weights(c, updater_role, updater_belief, updater_observati
 
 
 def _reference_estimate_update(
-    c, updater_role, updater_belief, partner_belief_estimate, updater_observation, updater_action, partner_action_probs, updater_action_prior
+    c, updater_role, updater_belief, partner_belief_estimate, updater_observation, updater_action, partner_action_probs, updater_action_as_partner_predicts
 ):
     """Steps 1-5 of update_other_belief_estimate_with_observation_only, from `updater_role`'s seat:
 
@@ -490,7 +490,7 @@ def _reference_estimate_update(
                 hypothetical_joint_action = _agent_order(updater_role, h, partner_action)
                 for next_state in range(S):
                     partner_posterior[next_state] += (
-                        updater_action_prior[h]
+                        updater_action_as_partner_predicts[h]
                         * _predicted_prob(c.T, partner_belief_estimate, hypothetical_joint_action, next_state)
                         * _own_observation_prob(c.O_joint, next_state, hypothetical_joint_action, partner_role, partner_observation)
                     )
@@ -560,7 +560,7 @@ def test_update_with_observation_only_matches_reference(seed, ego_role, traced):
             ego_belief=distrax.Categorical(probs=jnp.array(c.ego_belief)),
             ego_observation=c.ego_observation,
             ego_action_tminus1=c.ego_action,
-            other_action_distribution=distrax.Categorical(probs=jnp.array(other_action_probs)),
+            other_action_as_we_predict=distrax.Categorical(probs=jnp.array(other_action_probs)),
             ego_role=ego_role,
         )
     )
@@ -605,10 +605,10 @@ def test_update_other_belief_estimate_matches_reference(seed, ego_role, traced):
     before mixing.
     """
     c = _random_case(seed, ego_role, traced)
-    ego_action_prior = c.ego_action_prior  # P(h), a random distribution
+    ego_action_as_they_predict = c.ego_action_as_they_predict  # P(h), a random distribution
     other_action_probs = c.policy_probs(c.other_belief_estimate)  # π(a_other), passed in as given
     want = _reference_estimate_update(
-        c, c.ego_role, c.ego_belief, c.other_belief_estimate, c.ego_observation, c.ego_action, other_action_probs, ego_action_prior
+        c, c.ego_role, c.ego_belief, c.other_belief_estimate, c.ego_observation, c.ego_action, other_action_probs, ego_action_as_they_predict
     )
 
     got = c.run(
@@ -618,9 +618,9 @@ def test_update_other_belief_estimate_matches_reference(seed, ego_role, traced):
             other_belief_estimate=distrax.Categorical(probs=jnp.array(c.other_belief_estimate)),
             ego_observation=c.ego_observation,
             ego_action=c.ego_action,
-            other_action_distribution=distrax.Categorical(probs=jnp.array(other_action_probs)),
+            other_action_as_we_predict=distrax.Categorical(probs=jnp.array(other_action_probs)),
             ego_role=ego_role,
-            ego_action_prior=distrax.Categorical(probs=jnp.array(ego_action_prior)),
+            ego_action_as_they_predict=distrax.Categorical(probs=jnp.array(ego_action_as_they_predict)),
         )
     )
     _assert_close(got, want)
@@ -654,8 +654,8 @@ def test_update_second_order_ego_estimate_matches_reference(seed, ego_role, trac
     think we predict it."""
     c = _random_case(seed, ego_role, traced)
     other_action_probs = c.policy_probs(c.other_belief_estimate)  # their action, as we predict it
-    ego_action_prior = c.ego_action_prior  # our action, as they predict it
-    other_action_prior = c.other_action_prior  # their action, as they think we predict it
+    ego_action_as_they_predict = c.ego_action_as_they_predict  # our action, as they predict it
+    other_action_as_they_think_we_predict = c.other_action_as_they_think_we_predict  # their action, as they think we predict it
 
     weights = _reference_branch_weights(c, c.ego_role, c.ego_belief, c.ego_observation, c.ego_action, other_action_probs)
     want = np.zeros(S)
@@ -668,8 +668,8 @@ def test_update_second_order_ego_estimate_matches_reference(seed, ego_role, trac
                 c.second_order_ego_estimate,
                 other_observation,
                 other_action,
-                ego_action_prior,
-                other_action_prior,
+                ego_action_as_they_predict,
+                other_action_as_they_think_we_predict,
             )
             want += weights[other_action, other_observation] * their_estimate_of_us
 
@@ -681,10 +681,10 @@ def test_update_second_order_ego_estimate_matches_reference(seed, ego_role, trac
             second_order_ego_estimate=distrax.Categorical(probs=jnp.array(c.second_order_ego_estimate)),
             ego_observation=c.ego_observation,
             ego_action=c.ego_action,
-            other_action_distribution=distrax.Categorical(probs=jnp.array(other_action_probs)),
+            other_action_as_we_predict=distrax.Categorical(probs=jnp.array(other_action_probs)),
             ego_role=ego_role,
-            ego_action_prior=distrax.Categorical(probs=jnp.array(ego_action_prior)),
-            other_action_prior=distrax.Categorical(probs=jnp.array(other_action_prior)),
+            ego_action_as_they_predict=distrax.Categorical(probs=jnp.array(ego_action_as_they_predict)),
+            other_action_as_they_think_we_predict=distrax.Categorical(probs=jnp.array(other_action_as_they_think_we_predict)),
         )
     )
     _assert_close(got, _normalized(want))

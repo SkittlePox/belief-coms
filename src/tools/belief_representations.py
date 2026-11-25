@@ -43,13 +43,20 @@ Policies are Boltzmann over Q functions of TWO beliefs: an agent acts on π(· |
 b_estimate_of_partner). Predicting an action therefore needs that agent's two inputs, as
 the ego estimates them, and each prediction reaches one level higher than the agent's own:
 
-    argument                                 whose action, as predicted by   policy inputs
-    other_action_distribution                the other, by us                π_o(b̄_o, b̿_e)
-    ego_action_prior                         us, by the other                π_e(b̿_e, b⃛_o)
-    other_action_prior (second-order only)   the other, by them-modelling-us π_o(b⃛_o, b⁗_e)
+    argument                                  whose action, predicted by      policy inputs
+    other_action_as_we_predict                the other's, by us              π_o(b̄_o, b̿_e)
+    ego_action_as_they_predict                ours, by the other              π_e(b̿_e, b⃛_o)
+    other_action_as_they_think_we_predict     the other's, by us, as the      π_o(b⃛_o, b⁗_e)
+      (second-order update only)              other imagines it
 
-Only b_e, b̄_o and b̿_e are tracked, so the last two need a closure for the untracked
-levels. That choice belongs to the caller (the stacked env's ``belief_closure``).
+"We" and "they" are relative to the ego of each call. The second-order update runs the
+first-order estimate update from the OTHER agent's seat, so the names swap there.
+
+Only b_e, b̄_o and b̿_e are tracked, so the last two reach untracked levels. The caller
+supplies them; the stacked env never substitutes a lower level for an untracked one. It
+evaluates both with the Boltzmann policies, putting a stand-in belief U in every untracked
+slot: π_e(b̿_e, U) and π_o(U, U). U is the initial state distribution on an episode's
+first act and a uniform belief over all real states afterwards.
 
 Impossible observations
 -----------------------
@@ -116,7 +123,7 @@ def update_with_observation_only(
     ego_belief,
     ego_observation,
     ego_action_tminus1,
-    other_action_distribution,
+    other_action_as_we_predict,
     ego_role,
 ):
     """Bayesian belief update when the other agent's action is unobserved.
@@ -132,7 +139,7 @@ def update_with_observation_only(
         ego_belief: The ego's current belief b(s), a distrax.Categorical.
         ego_observation: The ego's observation at this timestep.
         ego_action_tminus1: The ego's own action at the previous timestep.
-        other_action_distribution: π, a Categorical over the OTHER agent's action at the
+        other_action_as_we_predict: π, a Categorical over the OTHER agent's action at the
             previous timestep, as we predict it. In the env this is their Boltzmann
             policy at our estimates of their inputs, π_o(· | b̄_o, b̿_e).
         ego_role: The ego's id.
@@ -142,7 +149,7 @@ def update_with_observation_only(
         under the model (see the module docstring).
     """
     T, O = ego_frame(env_params, ego_role)
-    other_action_probs = other_action_distribution.probs  # [A_other]
+    other_action_probs = other_action_as_we_predict.probs  # [A_other]
 
     predicted = jnp.einsum("s,sxt->xt", ego_belief.probs, T[:, ego_action_tminus1])  # [A_other, S']
     likelihood = O[:, ego_action_tminus1, :, ego_observation, :].sum(-1).T  # [A_other, S']
@@ -220,9 +227,9 @@ def update_other_belief_estimate_with_observation_only(
     other_belief_estimate,
     ego_observation,
     ego_action,
-    other_action_distribution,
+    other_action_as_we_predict,
     ego_role,
-    ego_action_prior,
+    ego_action_as_they_predict,
 ):
     """Update the ego's *mean-belief estimate* of the other agent's belief.
 
@@ -236,7 +243,7 @@ def update_other_belief_estimate_with_observation_only(
     For each action the other agent may have taken, a_other (a = (a_ego, a_other)):
 
       1. Their action distribution is given by the caller:
-         π(a_other) = other_action_distribution(a_other). Typically it is their Boltzmann
+         π(a_other) = other_action_as_we_predict(a_other). Typically it is their Boltzmann
          policy at our estimates of their inputs, π_o(· | b̄_o, b̿_e), since their
          behaviour last timestep was a function of their belief and their estimate of ours.
 
@@ -260,7 +267,7 @@ def update_other_belief_estimate_with_observation_only(
              pred_h(s')   = ∑_s T(s' | s, h, a_other) b̄(s)
              b_{a,o}(s')  ∝ ∑_h P(h) · pred_h(s') · O_other(o_other | s', h, a_other)
 
-         P(h) is ``ego_action_prior``: what THEY think we did, i.e. our policy at
+         P(h) is ``ego_action_as_they_predict``: what THEY think we did, i.e. our policy at
          their estimates of our inputs, π_e(· | b̿_e, b⃛_o). It is calculated outside
          this function (see "Where the action distributions come from" above).
 
@@ -299,18 +306,18 @@ def update_other_belief_estimate_with_observation_only(
         other_belief_estimate: The ego's current estimate b̄ of the other's belief.
         ego_observation: The ego's observation at this timestep.
         ego_action: The ego's OWN action at the previous timestep.
-        other_action_distribution: A Categorical over the OTHER agent's action at the
+        other_action_as_we_predict: A Categorical over the OTHER agent's action at the
             previous timestep (the unobserved a_other in step 1).
         ego_role: The ego's id.
-        ego_action_prior: P(h), a Categorical over OUR action at the previous timestep,
+        ego_action_as_they_predict: P(h), a Categorical over OUR action at the previous timestep,
             as the OTHER agent predicts it (step 4). Required, with no default. In the
             env it is our Boltzmann policy at their estimates of our inputs,
-            π_e(· | b̿_e, b⃛_o), with the untracked b⃛_o closed by the env's
-            ``belief_closure``.
+            π_e(· | b̿_e, b⃛_o). b⃛_o is not tracked, so the stacked env evaluates
+            π_e(· | b̿_e, U) with a stand-in belief U (see the module docstring).
 
     Returns:
         b̄' as a distrax.Categorical. All NaN if every branch has zero weight, i.e.
-        o_ego is impossible under pred_ego and other_action_distribution, or if a
+        o_ego is impossible under pred_ego and other_action_as_we_predict, or if a
         branch with positive weight is impossible from their seat, i.e. our estimates
         contradict each other (see the module docstring).
     """
@@ -321,12 +328,12 @@ def update_other_belief_estimate_with_observation_only(
 
     # 1-3. OUR side, under our actual action: weight each (a_other, o_other).
     #   s = state, t = next state, x = a_other, j = o_other
-    weights = _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_distribution)  # [X, O_other]
+    weights = _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_as_we_predict)  # [X, O_other]
 
     # 4. THEIR side, marginalizing our unseen action h.
     predicted_other = jnp.einsum("s,shxt->hxt", other_belief_estimate.probs, T)  # [H, X, S']
     other_obs_marginal = O.sum(3)  # [S', H, X, O_other]
-    posteriors = jnp.einsum("h,hxt,thxj->xjt", ego_action_prior.probs, predicted_other, other_obs_marginal)  # [X, O_other, S']
+    posteriors = jnp.einsum("h,hxt,thxj->xjt", ego_action_as_they_predict.probs, predicted_other, other_obs_marginal)  # [X, O_other, S']
     posteriors = posteriors / posteriors.sum(-1, keepdims=True)  # NaN where o_other is impossible from their seat
     # Not a fallback: zeroing only ZERO-weight branches keeps 0 · NaN from poisoning a
     # healthy estimate. A branch WE find possible but THEY find impossible means our
@@ -338,7 +345,7 @@ def update_other_belief_estimate_with_observation_only(
     return distrax.Categorical(probs=unnormalized / unnormalized.sum())
 
 
-def _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_distribution):
+def _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_as_we_predict):
     """Steps 1-3 of ``update_other_belief_estimate_with_observation_only``: how well each
     hypothesis (a_other, o_other) explains what the ego saw.
 
@@ -351,7 +358,7 @@ def _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_
     #   s = state, t = next state, x = a_other, j = o_other
     predicted_ego = jnp.einsum("s,sxt->xt", ego_belief.probs, T[:, ego_action])  # [X, S']
     obs_weights = jnp.einsum("xt,txj->xj", predicted_ego, O[:, ego_action, :, ego_observation, :])  # [X, O_other]
-    return other_action_distribution.probs[:, None] * obs_weights
+    return other_action_as_we_predict.probs[:, None] * obs_weights
 
 
 def initial_second_order_ego_estimate(env_params, ego_observation, ego_role, reset_action=0):
@@ -398,10 +405,10 @@ def update_second_order_ego_estimate_with_observation_only(
     second_order_ego_estimate,
     ego_observation,
     ego_action,
-    other_action_distribution,
+    other_action_as_we_predict,
     ego_role,
-    ego_action_prior,
-    other_action_prior,
+    ego_action_as_they_predict,
+    other_action_as_they_think_we_predict,
 ):
     """Update b̿_e, the ego's *mean* estimate of the other agent's estimate of the ego's belief.
 
@@ -417,26 +424,28 @@ def update_second_order_ego_estimate_with_observation_only(
         w(a_other, o_other)  as in steps 1-3 of the first-order update (OUR side)
 
         U(a_other, o_other) = update_other_belief_estimate_with_observation_only(
-            ego_belief                = b̄_o          their belief       (plug-in mean)
-            other_belief_estimate     = b̿_e          their estimate of us (plug-in mean)
-            ego_observation           = o_other
-            ego_action                = a_other
-            other_action_distribution = ego_action_prior    our action, as they predict it
-            ego_role                  = the other agent's role
-            ego_action_prior          = other_action_prior  their action, as they think we predict it
+            ego_belief                 = b̄_o     their belief          (plug-in mean)
+            other_belief_estimate      = b̿_e     their estimate of us  (plug-in mean)
+            ego_observation            = o_other
+            ego_action                 = a_other
+            other_action_as_we_predict = ego_action_as_they_predict
+                                                 our action, as they predict it
+            ego_role                   = the other agent's role
+            ego_action_as_they_predict = other_action_as_they_think_we_predict
+                                                 their action, as they think we predict it
         )
 
         b̿_e'(s) = ∑_{a_other, o_other} w(a_other, o_other) · U(a_other, o_other)(s)
 
     Our private information stays private one level up as well: our actual a_ego and
     o_ego appear only in w. Inside U our action is always a hypothesis, drawn from
-    ``ego_action_prior``.
+    ``ego_action_as_they_predict``.
 
     The approximation
     -----------------
     Every plug-in is a mean: b̄_o stands in for their belief, b̿_e for their estimate of
-    us, and the action distributions are policies applied to means (or closures, for
-    the untracked levels). The errors of the
+    us, and the action distributions are policies applied to means (with a stand-in
+    belief in place of the untracked levels). The errors of the
     first-order update (see its docstring) therefore apply twice, and b̿_e is cruder
     than b̄_o.
 
@@ -449,16 +458,16 @@ def update_second_order_ego_estimate_with_observation_only(
             ego's belief at the previous timestep.
         ego_observation: The ego's observation at this timestep.
         ego_action: The ego's own action at the previous timestep.
-        other_action_distribution: A Categorical over the OTHER agent's action at the
+        other_action_as_we_predict: A Categorical over the OTHER agent's action at the
             previous timestep, as WE predict it (e.g. π_o(· | b̄_o, b̿_e)).
         ego_role: The ego's id.
-        ego_action_prior: A Categorical over OUR action at the previous timestep, as THEY
+        ego_action_as_they_predict: A Categorical over OUR action at the previous timestep, as THEY
             predict it (e.g. π_e(· | b̿_e, b⃛_o)). The same quantity is the first-order
-            update's ``ego_action_prior``.
-        other_action_prior: A Categorical over THEIR action at the previous timestep, as
+            update's ``ego_action_as_they_predict``.
+        other_action_as_they_think_we_predict: A Categorical over THEIR action at the previous timestep, as
             they think WE predict it, π_o(· | b⃛_o, b⁗_e). Both inputs are beyond the
-            tracked levels, so the caller supplies a closure (the env's
-            ``belief_closure``).
+            tracked levels, so the stacked env evaluates π_o(· | U, U) with a stand-in
+            belief U (see the module docstring).
 
     Returns:
         b̿_e' as a distrax.Categorical. All NaN if every branch has zero weight (o_ego
@@ -466,19 +475,22 @@ def update_second_order_ego_estimate_with_observation_only(
         seat (see the module docstring).
     """
     T, O = ego_frame(env_params, ego_role)
-    weights = _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_distribution)  # [X, O_other]
+    weights = _branch_weights(T, O, ego_belief, ego_observation, ego_action, other_action_as_we_predict)  # [X, O_other]
     num_other_actions, num_other_observations = weights.shape
 
     def their_estimate_of_us(other_action, other_observation):
+        # Run from THEIR seat, so "we" in the callee's argument names means them: what they
+        # predict of us is our ego_action_as_they_predict, and what they think we predict of
+        # them is our other_action_as_they_think_we_predict.
         return update_other_belief_estimate_with_observation_only(
             env_params,
             ego_belief=other_belief_estimate,
             other_belief_estimate=second_order_ego_estimate,
             ego_observation=other_observation,
             ego_action=other_action,
-            other_action_distribution=ego_action_prior,
+            other_action_as_we_predict=ego_action_as_they_predict,
             ego_role=1 - ego_role,
-            ego_action_prior=other_action_prior,
+            ego_action_as_they_predict=other_action_as_they_think_we_predict,
         ).probs
 
     over_observations = jax.vmap(their_estimate_of_us, in_axes=(None, 0))

@@ -26,7 +26,7 @@ through or delete them as they're resolved.
 
 ## Headline
 
-- Tests pass (161 as of 2026-11-25: 119 belief-function, 11 stacked env, 28 Q policies,
+- Tests pass (159 as of 2026-11-25: 119 belief-function, 7 stacked env, 30 Q policies,
   3 GAE).
 - Training **runs end to end but does not train**:
   - the belief population's losses are NaN from the first iteration (B1);
@@ -172,6 +172,15 @@ Gaussians around a sigmoid mean; the renderer clips them to [0, 1].
 is the core of the project. `communication_scheme.py` and `game_role_assignment.py` are
 small and clean.
 
+**`step_env` is split by stage (2026-11-25).** `step_env` dispatches with a `lax.cond` on
+the (traced) stage to `_step_env_utterance_stage` (deliver utterances, store the speaker's
+estimate of its listener) or `_step_env_belief_stage` (listeners adopt their beliefs and
+store their estimates of their speakers and their new b̿_e, then the act and the episode
+boundary on a block's last round), and then advances the schedule and builds the
+observation for both. The rollout still makes one `step_env` call per stage with all five
+action inputs, and both stages return the same structure, so the no-act
+placeholders (NaN rewards, -1 actions and observations, NaN debug beliefs) remain.
+
 **B5. Env beliefs go NaN within a few acts at initialization.** Found 2026-11-16 in
 256-stage rollouts with untrained agents (5 seeds). Under `a_to_b`, 4 of 5 seeds go NaN,
 the earliest at stage 3, i.e. the first act after one communication round. Under
@@ -214,10 +223,18 @@ yet.
 - The speaker's post-utterance estimate of the listener is a passthrough in the rollout
   (`belief_estimate_post_utterance = env_state.estimated_agent_belief_states` in
   [rollout.py](../src/training/rollout.py)), so it never changes during communication.
-- The listener never updates its estimate of the *speaker* after hearing an utterance, even
-  though the utterance is evidence about the speaker's belief.
-- b̿_e does not move during communication at all (TODO in `step_env` section 2d, to be
-  re-designed next). A stale b̿_e biases every partner prediction π_o(b̄_o, b̿_e) at the act.
+- ~~The listener never updates its estimate of the *speaker* after hearing an utterance~~ —
+  the env side is done (2026-11-25): the belief stage takes `other_belief_estimate_actions`
+  (subject-indexed; the speakers' rows are written). The rollout still passes the existing
+  estimate through unchanged, as it does for `belief_estimate_post_utterance`; no model
+  produces either yet.
+- b̿_e: the listener's side is wired (2026-11-25). The belief stage takes
+  `second_order_ego_estimate_actions`, the listener's new estimate of what its speaker
+  believes about it, and writes the listeners' rows (b̿_e is stored by holder). The rollout
+  passes the existing b̿_e through unchanged. The speaker's side is still a TODO in
+  `_step_env_belief_stage` section 2: after uttering, the speaker should revise what it
+  thinks the listener thinks of it. A stale b̿_e biases the partner prediction
+  π_o(b̄_o, b̿_e) at the act.
 
 **D1. Reset observations.** The stacked env emits no reset observation; beliefs and
 estimates start at the prior. `belief_representations` argues this is a significant
@@ -245,8 +262,9 @@ covered into `tests/` and delete the rest.
 - `agent_utterance_actions_rendered` is always `None`.
 - `global_rng_key` is written at reset and never read.
 - `get_obs(key, ...)` never uses `key`.
-- One flag, two names: `skip_first_communication_step` (constructor / config) vs
-  `act_on_reset_before_communicating` (attribute).
+- ~~One flag, two names: `skip_first_communication_step` vs
+  `act_on_reset_before_communicating`~~ — the act-before-communicating option was removed
+  2026-11-25; every episode starts with communication at env timestep 0.
 - ~~`cumulative_communication_round_iterator` counts `step_env` calls, not rounds~~ —
   renamed `cumulative_stage_count` (T4).
 
@@ -295,10 +313,16 @@ functions of the actor's own belief. They are now Boltzmann over Q functions of 
   observer is inert in T, O and R. `observer_q_function` is constant, so the observer acts
   uniformly. Defaults: γ = 0.9, β = 10. Both Q functions return NaN for a NaN belief.
 - Stacked env: an agent acts on π(b_e, b̄_o) and predicts its partner's unseen action as
-  π_o(b̄_o, b̿_e). The two predictions that need levels above b̿_e go through
-  `EnvironmentConfig.belief_closure` (`--environment.belief-closure`): `uniform` (default;
-  uniform action priors) or `stationary` (each untracked level copies the level two below
-  it: b⃛_o := b̄_o, b⁗_e := b̿_e).
+  π_o(b̄_o, b̿_e). Two predictions need levels above b̿_e: `ego_action_as_they_predict` = π_e(b̿_e, b⃛_o)
+  and `other_action_as_they_think_we_predict` = π_o(b⃛_o, b⁗_e). Both are evaluated with the Boltzmann
+  policies, with a stand-in belief U in every untracked slot: π_e(b̿_e, U) and π_o(U, U). U is the
+  game's initial state distribution on an episode's first act (even after that act's
+  communication), and a uniform belief over all real states, terminal ones included, on
+  later acts. A lower level is never substituted for an untracked one (a `stationary` option
+  that did so was removed the same day). In the guessing game U changes nothing: the presser's Q
+  ignores b̄_o, the observer's is constant, and U is symmetric over the referents, so a
+  symmetric P(press) cancels out of the observer's b̿_e update. A test injects an asymmetric
+  prediction to check that the first-act flag reaches the updates.
 
 ---
 
@@ -317,7 +341,7 @@ Claude refactored [belief_representations.py](../src/tools/belief_representation
   `update_other_belief_estimate_with_observation_only`. The two observation-only updates
   take keyword-only arguments (`ego_belief=`, `other_belief_estimate=`, `ego_observation=`,
   `ego_role=`, plus `ego_action_tminus1=` / `ego_action=` — see T9). Since 2026-11-25 all
-  three observation-only updates take `other_action_distribution=`, a Categorical over the
+  three observation-only updates take `other_action_as_we_predict=`, a Categorical over the
   other agent's action; none of them calls a policy (the ego update used to take
   `other_policy=`).
 - **Traceable params.** The functions read cardinalities from tensor shapes, never
@@ -350,7 +374,7 @@ Claude refactored [belief_representations.py](../src/tools/belief_representation
   has 119 tests: worked examples, `test_impossible_observations_produce_nan`, and a
   `*_matches_reference` test per function against brute-force references. These are
   parametrized over seed, `ego_role` and traced vs concrete inputs, and the estimate
-  update also with a random `ego_action_prior`.
+  update also with a random `ego_action_as_they_predict`.
 
 What's left over from it is in T9.
 
@@ -361,9 +385,9 @@ policies"). (2026-11-16) The memo-based
 `update_second_order_ego_estimate_with_observation_only`, which updates b̿_e (our estimate of
 their estimate of our belief). It reuses the first-order branch weights
 (`_branch_weights`) and, in each branch, runs the first-order estimate update from the
-other agent's seat. With two-belief policies, `ego_action_prior` is π_e(b̿_e, b⃛_o) and
-`other_action_prior` is π_o(b⃛_o, b⁗_e); both reach above the tracked levels, so the env
-fills them in according to `belief_closure`. The reset-observation initializers
+other agent's seat. With two-belief policies, `ego_action_as_they_predict` is π_e(b̿_e, b⃛_o) and
+`other_action_as_they_think_we_predict` is π_o(b⃛_o, b⁗_e); both reach above the tracked levels. The env
+evaluates them as π_e(b̿_e, U) and π_o(U, U), where U is the initial state distribution on the first act and uniform over all real states afterwards. The reset-observation initializers
 (`initial_second_order_ego_estimate` etc.) are still unused by the env (D1).
 
 **T9. `belief_representations` leftovers** (after the refactor above).

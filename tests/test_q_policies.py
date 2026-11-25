@@ -1,5 +1,5 @@
 """Tests for the Q-function policies: the guessing game's Q functions, the Boltzmann
-policy, the policy bundle, and the stacked env's belief-closure switch.
+policy, the policy bundle, and the stacked env's priors for untracked belief levels.
 
 Run with::
 
@@ -133,20 +133,76 @@ def test_policy_bundle_dispatches_traced_game_type_and_role():
         np.testing.assert_allclose(got, want, atol=1e-6)
 
 
-def test_unknown_belief_closure_is_rejected():
-    with pytest.raises(ValueError, match="belief_closure"):
-        Harness.build(belief_closure="third_order")
+@pytest.mark.parametrize("is_first_act", [True, False])
+def test_untracked_level_predictions(is_first_act):
+    """The predictions that reach levels above b̿_e never use a lower level in place of an
+    untracked one. Both are Boltzmann policies with a stand-in belief U in every untracked
+    slot: ego_action_as_they_predict = π_e(b̿_e, U), other_action_as_they_think_we_predict =
+    π_o(U, U). U is the initial state distribution on the first act, uniform over all real
+    states (terminal included) afterwards."""
+    harness = Harness.build()
+    env = harness.env
+    params = jax.tree.map(lambda leaf: leaf[0], env.all_env_parameters)
+    second_order = _categorical([0.7, 0.2, 0.1, 0.0])
+    stand_in = _categorical([1 / 3, 1 / 3, 1 / 3, 0.0] if is_first_act else [0.25, 0.25, 0.25, 0.25])
+    for role in (0, 1):
+        ego_action_as_they_predict, other_action_as_they_think_we_predict = env._untracked_level_predictions(
+            0, role, params, second_order, jnp.array(is_first_act)
+        )
+        np.testing.assert_allclose(ego_action_as_they_predict.probs, env.policy_bundle(0, role, second_order, stand_in).probs, atol=1e-6)
+        np.testing.assert_allclose(
+            other_action_as_they_think_we_predict.probs, env.policy_bundle(0, 1 - role, stand_in, stand_in).probs, atol=1e-6
+        )
+    # The presser's prediction really depends on b̿_e: a sharp b̿_e makes it press that button.
+    presser_prediction, _ = env._untracked_level_predictions(0, 0, params, _categorical([0, 0, 1, 0]), jnp.array(is_first_act))
+    assert int(jnp.argmax(presser_prediction.probs)) == 2
 
 
-def test_belief_closure_changes_the_pressers_second_order_estimate():
-    """The closure sets how the observer is assumed to predict the presser's action. The
-    presser's actions move the state, so what the presser thinks the observer now thinks
-    of it (b̿_e) depends on that assumption after the first act."""
-    second_order = {}
-    for closure in ("uniform", "stationary"):
-        harness = Harness.build(scheme="a_to_b", num_agents=4, horizon=5, belief_closure=closure, estimate_mode="keep")
-        roll = harness.rollout(seed=0, num_steps=2)  # a_to_b: one round (2 calls), then the act
-        assert int(roll.states[2].game_counters.underlying_env_timestep) == 1
-        second_order[closure] = np.asarray(roll.states[2].second_order_agent_belief_estimates)
-    # With fixed_pairs_assignment_fn the pressers are the even agents, and row i is held by agent i.
-    assert not np.allclose(second_order["uniform"][0::2], second_order["stationary"][0::2], atol=1e-3)
+def test_untracked_presser_prediction_is_not_uniform_actions():
+    """From the observer's seat, the presser's action as the presser thinks the observer
+    predicts it is π_presser(U, U): mostly waiting, not uniform over actions."""
+    env = Harness.build().env
+    params = jax.tree.map(lambda leaf: leaf[0], env.all_env_parameters)
+    for is_first_act in (True, False):
+        _, presser_prediction = env._untracked_level_predictions(0, 1, params, _categorical([0.25] * 4), jnp.array(is_first_act))
+        assert int(jnp.argmax(presser_prediction.probs)) == WAIT
+        assert float(presser_prediction.probs[WAIT]) > 0.5
+
+
+def test_first_act_flag_reaches_the_untracked_predictions(monkeypatch):
+    """_step_underlying_env passes "is this the episode's first act" down to
+    _untracked_level_predictions.
+
+    The guessing game cannot show this on its own: U is symmetric over the referents, so
+    every π(U, ·) presses each button equally, and a symmetric P(press) cancels out of
+    the observer's b̿_e. Wrap the real predictions so that ONLY on the first act the
+    presser's predicted action skews toward button 0: the observer's b̿_e must then
+    differ between a first act and a later act, while b_e and b̄_o must not."""
+    harness = Harness.build()
+    env = harness.env
+    real = env._untracked_level_predictions
+
+    def flagged(game_type, role, game_params, second_order_ego_estimate, is_first_act):
+        ego, other = real(game_type, role, game_params, second_order_ego_estimate, is_first_act)
+        skewed = jnp.array([0.9, 0.0, 0.0, 0.1])
+        return ego, distrax.Categorical(probs=jnp.where(is_first_act, skewed, other.probs))
+
+    monkeypatch.setattr(env, "_untracked_level_predictions", flagged)
+    state, _ = harness.reset(0)
+    args = (
+        jax.random.key(1),
+        state.game_states,
+        state.game_roles,
+        state.true_agent_belief_states,
+        state.estimated_agent_belief_states,
+        state.second_order_agent_belief_estimates,
+    )
+    first = env._step_underlying_env(*args, jnp.asarray(0, dtype=jnp.int32))
+    later = env._step_underlying_env(*args, jnp.asarray(5, dtype=jnp.int32))
+    np.testing.assert_array_equal(first[5], later[5])  # same sampled actions
+    np.testing.assert_allclose(first[1], later[1])  # b_e
+    np.testing.assert_allclose(first[2], later[2])  # b̄_o
+    observers = np.asarray(state.game_roles.agent_role_assignment) == 1
+    presser_ids = ~observers
+    np.testing.assert_allclose(np.asarray(first[3])[presser_ids], np.asarray(later[3])[presser_ids])  # observer's action is inert
+    assert not np.allclose(np.asarray(first[3])[observers], np.asarray(later[3])[observers])  # observer's b̿_e moved

@@ -44,11 +44,13 @@ EstimateMode = Literal["oracle", "keep"]
 
 
 class Actions(NamedTuple):
-    """The three per-call step_env inputs, with step_env's own index conventions."""
+    """The five per-call step_env inputs, with step_env's own index conventions."""
 
     utterances: chex.Array  # [num_agents, utterance_action_dim], AGENT-indexed
-    estimates: chex.Array  # [num_agents, S], SUBJECT-indexed (row i = estimate ABOUT agent i)
+    estimates: chex.Array  # [num_agents, S], SUBJECT-indexed (row i = estimate ABOUT agent i); speakers' estimates of listeners
     beliefs: chex.Array  # [num_agents, S], AGENT-indexed (row i = agent i's new belief)
+    other_belief_estimate_actions: chex.Array  # [num_agents, S], SUBJECT-indexed; listeners' estimates of speakers
+    second_order_ego_estimate_actions: chex.Array  # [num_agents, S], by holder; listeners' new b̿_e
 
 
 class Rollout(NamedTuple):
@@ -112,11 +114,9 @@ class Harness:
         scheme: str | Callable = "a_to_b",
         num_agents: int = 4,
         horizon: int = 3,
-        act_first: bool = False,
         utterance_action_dim: int = 3,
         assignment_fn: Callable | None = None,
         estimate_mode: EstimateMode = "oracle",
-        belief_closure: str = "uniform",
     ) -> "Harness":
         """A small guessing-game env. ``scheme`` is a scheme name or a CommunicationSchemeFn."""
         stacked_params, policy_bundle = assemble_environments([guessing_game_spec])
@@ -127,8 +127,6 @@ class Harness:
             assignment_fn=assignment_fn or fixed_pairs_assignment_fn(num_agents=num_agents, underlying_env_steps_per_episode=horizon),
             communication_scheme_fn=get_scheme_fn(scheme) if isinstance(scheme, str) else scheme,
             utterance_action_dim=utterance_action_dim,
-            skip_first_communication_step=act_first,
-            belief_closure=belief_closure,
         )
         return cls(env, estimate_mode)
 
@@ -142,12 +140,22 @@ class Harness:
             utterances=sentinel_utterances(self.env.num_agents, self.env.utterance_action_dim),
             estimates=estimates,
             beliefs=state.true_agent_belief_states,
+            other_belief_estimate_actions=estimates,
+            second_order_ego_estimate_actions=state.second_order_agent_belief_estimates,
         )
 
     def step(self, key: chex.PRNGKey, state: StackedSignificationState, actions: Actions | None = None):
         """One step_env call; returns (state, obs, rewards, post_comm_true_beliefs, post_comm_estimated_beliefs)."""
         actions = self.actions(state) if actions is None else actions
-        return self._step(key, state, actions.utterances, actions.estimates, actions.beliefs)
+        return self._step(
+            key,
+            state,
+            actions.utterances,
+            actions.estimates,
+            actions.beliefs,
+            actions.other_belief_estimate_actions,
+            actions.second_order_ego_estimate_actions,
+        )
 
     def rollout(self, seed: int = 0, num_steps: int = 10, actions_fn: Callable | None = None) -> Rollout:
         """Reset then drive ``num_steps`` step_env calls. ``actions_fn(state) -> Actions``

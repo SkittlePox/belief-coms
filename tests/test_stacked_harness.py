@@ -1,10 +1,11 @@
-"""Sanity checks for tests/stacked_harness.py itself (not the env's behavior).
+"""Sanity checks for tests/stacked_harness.py itself, plus step_env wiring checks run through it.
 
 Run with::
 
     uv run pytest tests/test_stacked_harness.py
 """
 
+import jax
 import numpy as np
 import pytest
 
@@ -35,14 +36,10 @@ def test_padded_scheme_keeps_real_round_count():
     assert int(scheme.total_num_rounds) == 2
 
 
-@pytest.mark.parametrize("belief_closure", ["uniform", "stationary"])
 @pytest.mark.parametrize("estimate_mode", ["oracle", "keep"])
-@pytest.mark.parametrize("act_first", [False, True])
-def test_rollout_runs_and_keeps_beliefs_valid(estimate_mode, act_first, belief_closure):
+def test_rollout_runs_and_keeps_beliefs_valid(estimate_mode):
     """A few episodes of passthrough driving: every stored belief stays a distribution."""
-    h = Harness.build(
-        scheme="a_to_b_thrice", num_agents=4, horizon=2, act_first=act_first, estimate_mode=estimate_mode, belief_closure=belief_closure
-    )
+    h = Harness.build(scheme="a_to_b_thrice", num_agents=4, horizon=2, estimate_mode=estimate_mode)
     roll = h.rollout(seed=0, num_steps=6 * 5)  # 6 calls per a_to_b_thrice block, 5 blocks
     assert len(roll.states) == len(roll.obs) == 31
     assert len(roll.post_comm_true_beliefs) == len(roll.post_comm_estimated_beliefs) == len(roll.rewards) == len(roll.actions) == 30
@@ -53,3 +50,57 @@ def test_rollout_runs_and_keeps_beliefs_valid(estimate_mode, act_first, belief_c
             np.testing.assert_allclose(b.sum(-1), 1.0, atol=1e-5)
     # 5 blocks with horizon 2 must have crossed at least one episode boundary.
     assert schedule(roll.states[-1])[5] >= 1
+
+
+def test_belief_stage_records_listeners_estimates_of_speakers():
+    """The utterance stage writes the speakers' estimates of the listeners (the listeners'
+    subject rows); the belief stage writes the listeners' estimates of the speakers (the
+    speakers' subject rows) and the listeners' own b̿_e rows. Under a_to_b (one round per
+    block) that belief stage is the act, which runs on -- and reports -- the estimates as
+    just written."""
+    h = Harness.build(scheme="a_to_b")
+    state, _ = h.reset(seed=0)
+    speakers = np.asarray(state.game_roles.agent_role_assignment) == 0  # a_to_b: role 0 speaks
+    listeners = ~speakers
+
+    def skewed(at):
+        est = state.true_agent_belief_states.at[:, at].add(0.5)
+        return est / est.sum(axis=-1, keepdims=True)
+
+    about_listeners, about_speakers, listeners_second_order = skewed(0), skewed(1), skewed(2)
+    base = h.actions(state)
+    actions = base._replace(
+        estimates=about_listeners,
+        other_belief_estimate_actions=about_speakers,
+        second_order_ego_estimate_actions=listeners_second_order,
+    )
+
+    after_utt, *_ = h.step(jax.random.key(1), state, actions)
+    np.testing.assert_array_equal(after_utt.estimated_agent_belief_states[listeners], about_listeners[listeners])
+    np.testing.assert_array_equal(after_utt.estimated_agent_belief_states[speakers], state.estimated_agent_belief_states[speakers])
+    np.testing.assert_array_equal(after_utt.second_order_agent_belief_estimates, state.second_order_agent_belief_estimates)
+
+    after_belief, _, _, _, post_comm_estimated = h.step(jax.random.key(2), after_utt, actions)
+    expected = np.where(speakers[:, None], about_speakers, about_listeners)
+    np.testing.assert_array_equal(post_comm_estimated, expected)
+    assert int(after_belief.game_counters.underlying_env_timestep) == 1, "the belief stage acted"
+
+
+def test_belief_stage_records_listeners_second_order_estimates():
+    """b̿_e is stored by holder, so the belief stage writes the LISTENERS' rows and leaves
+    the speakers'. Checked under a_to_b_thrice, whose first belief stage does not act (an
+    act would move every b̿_e row through the observation update)."""
+    h = Harness.build(scheme="a_to_b_thrice")
+    state, _ = h.reset(seed=0)
+    listeners = np.asarray(state.game_roles.agent_role_assignment) == 1  # a_to_b: role 0 speaks
+    new_second_order = state.true_agent_belief_states.at[:, 2].add(0.5)
+    new_second_order = new_second_order / new_second_order.sum(axis=-1, keepdims=True)
+
+    after_utt, *_ = h.step(jax.random.key(1), state)
+    actions = h.actions(after_utt)._replace(second_order_ego_estimate_actions=new_second_order)
+    after_belief, *_ = h.step(jax.random.key(2), after_utt, actions)
+    assert int(after_belief.game_counters.underlying_env_timestep) == 0, "no act on the first round"
+    np.testing.assert_array_equal(after_belief.second_order_agent_belief_estimates[listeners], new_second_order[listeners])
+    np.testing.assert_array_equal(
+        after_belief.second_order_agent_belief_estimates[~listeners], state.second_order_agent_belief_estimates[~listeners]
+    )
