@@ -72,14 +72,13 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
     off its train state.
     """
     belief_train_states, utterance_train_states, env_state, last_obs, rng = carry
-    # last_obs is get_obs(state) from the PREVIOUS step: (beliefs, estimated_beliefs,
-    # second_order_estimates, utterances), each [num_agents, ...]. On the belief stage the
-    # belief group is NaN'd and on the utterance stage the utterances are NaN'd -- see
-    # get_obs. We only feed the gathered partner quantities from here; the own belief we
-    # read from the state directly.
+    # last_obs is get_obs(state) from the PREVIOUS step, each [num_agents, ...] and indexed
+    # so row i is what agent i consumes: its own belief, its estimate of its partner, its
+    # second-order estimate, and the utterance it hears (NaN on the utterance stage, when
+    # there is none yet) -- see get_obs.
     # NOTE: second-order estimates (b̿_e) are not consumed yet; the speaker and listener
     # models will take them as inputs.
-    _obs_beliefs, obs_partner_estimates, _obs_second_order_estimates, obs_partner_utterances = last_obs
+    own_beliefs, obs_partner_estimates, _obs_second_order_estimates, obs_partner_utterances = last_obs
 
     rng, utt_rng, bel_rng, render_rng, step_rng = jax.random.split(rng, 5)
 
@@ -87,11 +86,6 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
     # are in (to detect a boundary crossing after the step, for the GAE ``done`` flag).
     stage = env_state.dialog.communicative_round_stage
     episode_index_before = env_state.game_counters.episode_index
-
-    # Each agent's own current belief, straight from the world state (always valid, unlike
-    # the obs copy which the belief stage NaNs). This is the "existing belief" both
-    # populations condition on.
-    own_beliefs = env_state.true_agent_belief_states  # [num_agents, belief_dim]
 
     # Each population as an (apply_fn, params) handle, so the strategy can be handed both
     # its own and its partner's model uniformly (the partner is unused in first-order mode).

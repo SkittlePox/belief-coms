@@ -319,28 +319,22 @@ class StackedSignificationDecPOMDP:
             (the speaker) emitted -- again the partner's row of the (speaker-indexed)
             utterance store, gathered by partner_agent.
 
-        Depending on communicative_round_stage the group that is irrelevant to the action
-        the agent is about to take is filled with NaN (so the caller can mask on it); the
-        shapes are unchanged either way:
-          - UTTERANCE_STAGE: the agent speaks from its (own + estimated) beliefs, so the
-            incoming utterance is meaningless -> utterances are NaN.
-          - BELIEF_STAGE: the agent forms a new belief from the received utterance, so the
-            belief inputs are meaningless -> beliefs and estimated_beliefs are NaN.
+        beliefs, estimated_beliefs and second_order_estimates are always the current values,
+        on both stages: the speaker utters from them, and the listener updates them.
 
-        second_order_estimates are never NaN'd. The speaker conditions on them when
-        choosing an utterance, and the listener needs them on the belief stage to read
-        an utterance as aimed at what the speaker thinks it believes.
+        utterances are NaN on the UTTERANCE_STAGE, because there is no utterance to hear
+        yet (the speakers are about to emit them). On the BELIEF_STAGE, listeners hear
+        their speaker's utterance; a speaker's row is its silent listener's NaN row.
         """
         partner_agent = state.game_roles.partner_agent
 
         on_utterance_stage = state.dialog.communicative_round_stage == UTTERANCE_STAGE
         # beliefs[i] = agent i's own belief (subject-indexed as stored).
-        beliefs = jnp.where(on_utterance_stage, state.true_agent_belief_states, jnp.nan)
-        # estimated_beliefs[i] = estimate of agent i's partner (the receiver it is engaged
+        beliefs = state.true_agent_belief_states
+        # estimated_beliefs[i] = estimate of agent i's partner (the agent it is engaged
         # with). estimated_agent_belief_states is subject-indexed, so the estimate ABOUT
         # the partner lives at partner_agent[i].
-        partner_estimates = state.estimated_agent_belief_states[partner_agent]
-        estimated_beliefs = jnp.where(on_utterance_stage, partner_estimates, jnp.nan)
+        estimated_beliefs = state.estimated_agent_belief_states[partner_agent]
         # utterances[i] = the utterance agent i's partner (the speaker) emitted, stored
         # under that speaker's own row.
         partner_utterances = state.agent_utterance_actions_unrendered[partner_agent]
@@ -1111,14 +1105,15 @@ if __name__ == "__main__":
     assert jnp.all(jnp.isnan(after_utt.agent_utterance_actions_unrendered[role1]))
     print("ok: utterance stage stashes speakers' (role 0) utterances, NaNs listeners")
 
-    # get_obs: after one step we are on the belief stage, so the observation NaNs the
-    # belief groups and keeps the utterances (the opposite of the reset observation).
+    # get_obs: after one step we are on the belief stage. The belief groups are the current
+    # values (the listener updates them), and listeners now hear their speaker's utterance.
     ou_beliefs, ou_estimated, ou_second_order, ou_utterances = after_utt_obs
-    assert jnp.all(jnp.isnan(ou_beliefs)), "belief-stage obs NaNs the beliefs"
-    assert jnp.all(jnp.isnan(ou_estimated)), "belief-stage obs NaNs the estimated beliefs"
-    assert not jnp.any(jnp.isnan(ou_second_order)), "belief-stage obs keeps the second-order estimates"
-    assert not jnp.any(jnp.isnan(ou_utterances[role1])), "belief-stage obs keeps the listeners' utterances"
-    print("ok: belief-stage observation NaNs beliefs, keeps utterances")
+    partner = s0.game_roles.partner_agent
+    assert jnp.all(ou_beliefs == after_utt.true_agent_belief_states), "belief-stage obs has each agent's own belief"
+    assert jnp.all(ou_estimated == after_utt.estimated_agent_belief_states[partner]), "...its estimate of its partner"
+    assert jnp.all(ou_second_order == after_utt.second_order_agent_belief_estimates), "...and its second-order estimate"
+    assert not jnp.any(jnp.isnan(ou_utterances[role1])), "belief-stage obs has the listeners' utterances"
+    print("ok: belief-stage observation has all belief levels and the listeners' utterances")
 
     # get_obs indexing: utterances are remapped to the PARTNER (speaker), not the agent's
     # own row. role 0 spoke ones, role 1 was NaN'd; so each listener (role 1) HEARS its
@@ -1130,7 +1125,7 @@ if __name__ == "__main__":
     # get_obs indexing: on the utterance stage, estimated_beliefs is the estimate of the
     # RECEIVER (partner) the sender is engaged with -- the partner's subject-indexed row.
     us_beliefs, us_estimated, us_second_order, us_utterances = sched_env.get_obs(jax.random.key(0), s0)
-    partner = s0.game_roles.partner_agent
+    assert jnp.all(jnp.isnan(us_utterances)), "utterance-stage obs has no utterance to hear"
     assert jnp.all(us_beliefs == s0.true_agent_belief_states), "beliefs[i] is agent i's own belief"
     assert jnp.all(
         us_estimated == s0.estimated_agent_belief_states[partner]

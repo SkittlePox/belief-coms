@@ -21,8 +21,8 @@ The env alternates utterance/belief stages and each population only decides on i
 stage. We recompute the policy on EVERY stored step (cheap, and keeps shapes uniform) but
 the loss is a **masked mean** over just this population's stages -- the same
 ``UTTERANCE_STAGE``/``BELIEF_STAGE`` split used to build the advantages. Off-stage entries
-of the stored transitions can be non-finite (e.g. the speaker ran on the belief stage's
-NaN partner-estimate), so the loss ``nan_to_num``s the recompute inputs first: a NaN in a
+of the stored transitions are not guaranteed finite (off-stage targets are garbage; see
+training.advantages), so the loss ``nan_to_num``s the recompute inputs first: a NaN in a
 masked-out term still poisons gradients (``0 * NaN = NaN``), so it must never enter the
 graph, not merely be zeroed after the fact.
 
@@ -66,9 +66,9 @@ def _ppo_loss(params, apply_fn, net_input_0, net_input_1, actions, old_log_probs
     utterance_image; utterance: own_belief, partner_estimate). ``stage_mask`` is the boolean
     per-step mask of this population's own stages. Returns ``(loss, aux_metrics)``.
     """
-    # Sanitize everything derived from off-stage steps (all masked out below): the env NaNs
-    # the irrelevant observations, so the stored recompute inputs / old stats can be NaN
-    # there, and so can `targets` (== advantage + value, and the value is NaN off-stage). A
+    # Sanitize everything derived from off-stage steps (all masked out below): the stored
+    # recompute inputs / old stats are not guaranteed finite there, and neither is
+    # `targets` (off-stage targets are garbage; see training.advantages). A
     # NaN anywhere poisons the gradient even when its step is masked (0 * NaN = NaN), so it
     # must never enter the graph. On-stage steps are finite, so this is a no-op where it
     # matters.
