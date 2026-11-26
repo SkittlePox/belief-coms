@@ -12,14 +12,15 @@ IDs so they can be referenced in discussion; delete them when resolved.
 
 ## Headline
 
-- Tests pass (159: 119 belief-function, 7 stacked env, 30 Q policies, 3 GAE). Nothing
-  covers the agents, the rollout or the PPO update.
+- Tests pass (168: 119 belief-function, 7 stacked env, 30 Q policies, 3 GAE, 9 agents).
+  Nothing covers the rollout or the PPO update.
 - Training **runs end to end but does not train**: belief log-probs are `+inf` (B1), env
   beliefs go NaN after a few acts (B5), multi-round schemes lose their learning signal
   (B2), and the loss masks credit agents for discarded actions (B3).
-- The env takes communication updates to every belief level, but the agents only produce
-  utterances and the listener's b_e; the rollout passes the four estimate inputs through
-  unchanged. Agent redesign is tabled in [src/agents/NOTES.md](../src/agents/NOTES.md).
+- The env takes communication updates to every belief level, but the e2e agents only
+  produce utterances and the listener's b_e; the rollout passes the four b̄_o / b̿_e inputs
+  through unchanged. What should produce them is open in
+  [src/agents/NOTES.md](../src/agents/NOTES.md).
 - The only environment is the guessing game, a weak test of communication (D4).
 
 ### Suggested order
@@ -59,10 +60,11 @@ IDs so they can be referenced in discussion; delete them when resolved.
 ## `training`
 
 **B1. Belief log-prob is `+inf`, so belief PPO is NaN from iteration 0.** The guessing-game
-prior has zero mass on the done state, so `BeliefActor`'s `log b = -inf` there, the
-Dirichlet concentration is `1e-4`, sampled coordinates come out as exactly `0.0`, and
-`log_prob` is `+inf` on every belief stage (still visible in `inspect_rollout`). The same
-exact zeros feed B5. Fix options are D3.
+prior has zero mass on the done state. With `multiply_by_ego_belief` on (the default), the
+e2e belief agent's logits are `log b + log L`, so `log b = -inf` there, the Dirichlet
+concentration is `1e-4`, sampled coordinates come out as exactly `0.0`, and `log_prob` is
+`+inf` on every belief stage (still visible in `inspect_rollout`). The same exact zeros feed
+B5. Fix options are D3.
 
 **B2. Multi-round schemes have no learning signal.** In e.g. `a_to_b_thrice`, non-final
 belief stages carry a NaN reward placeholder that is never filled in. In `_masked_gae`
@@ -87,8 +89,8 @@ stored and recomputed log-prob. Check that the ratio is exactly 1 on the first m
 the first epoch.
 
 **G4. ToM executors are placeholders.** `execute_tom_*` in
-[agent_execution.py](../src/training/agent_execution.py) behave first-order, and they vmap
-the partner population index-aligned instead of gathering the real partner via
+[inference_agents.py](../src/agents/inference_agents.py) behave like the e2e agents, and they
+vmap the partner population index-aligned instead of gathering the real partner via
 `game_roles.partner_agent`.
 
 **G5. No wandb logging.** [wandb_log.py](../src/training/wandb_log.py) is empty and
@@ -109,12 +111,15 @@ counts stages and could become `--rollout-length`.
 
 ## `agents`
 
-See also [src/agents/NOTES.md](../src/agents/NOTES.md) for the tabled redesign.
+See also [src/agents/NOTES.md](../src/agents/NOTES.md) for the current agents and the open
+question of what produces b̄_o and b̿_e.
 
-**D3. What is a belief action?** `BeliefActor` uses `softplus(log b + log L)` as a Dirichlet
-concentration. Besides B1, this is not the Bayesian update its docstring claims: it is not
-invariant to adding a constant to `log L`, and the Dirichlet's mean is
-`∝ softplus(log posterior)`, not the posterior. The listener also adopts its sample
+**D3. What is a belief action?** The e2e belief agent uses `softplus(logits)` as a Dirichlet
+concentration, with `logits = log b + log L` when `multiply_by_ego_belief` is on (the
+default) and `log L` alone when it is off. Besides B1, the "on" form is not a Bayesian
+update: it is not invariant to adding a constant to `log L`, and the Dirichlet's mean is
+`∝ softplus(log posterior)`, not the posterior. The "off" form avoids B1's `-inf` but has
+no support guarantee at all. The listener also adopts its sample
 verbatim as its true belief, so it can drop support it never ruled out (the true-belief
 half of B5). Options:
 - a Dirichlet restricted to the support of `b` (zero-support coordinates fixed at 0 and
@@ -122,11 +127,11 @@ half of B5). Options:
 - make the action a log-likelihood vector and compute the belief as `normalize(b · L)` (a
   "likelihood action"), which makes the support guarantee exact.
 
-**Perf.** The conv trunk has no pooling: 32×32×64 → Dense(128) is ~8.4M params per head,
-~17M per belief agent, times `num_agents`.
+**Perf.** The conv trunk has no pooling: 32×32×64 → Dense(128) is ~8.4M params per trunk,
+and the actor and critic each have one, so ~17M per belief agent, times `num_agents`.
 
-**Minor.** `UtteranceCritic.belief_dim` is unused. Utterance samples are unbounded
-Gaussians around a sigmoid mean; the renderer clips them to [0, 1].
+**Minor.** Utterance samples are unbounded Gaussians around a sigmoid mean; the renderer
+clips them to [0, 1].
 
 ---
 

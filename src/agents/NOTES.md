@@ -1,52 +1,57 @@
-# Agent redesign notes (tabled 2026-11-25)
+# Agent notes (revised 2026-11-25)
 
-Open questions about the belief and utterance agents, written down when `step_env`'s
-arguments changed. Nothing here is decided.
+Where the agents stand and what is still open.
 
-## What `step_env` now asks of the agents
+## Current agents
 
-Each stage takes the communicating agent's updated beliefs:
+| Agent | File | Inputs | Outputs |
+|---|---|---|---|
+| e2e utterance (speaker) | `e2e_utterance_agents.py` | b_e, b̄_o, b̿_e | MultivariateNormalDiag over utterances, value |
+| e2e belief (listener) | `e2e_belief_agents.py` | b_e, b̄_o, b̿_e, rendered utterance | Dirichlet over the new b_e, value |
 
-| Stage | Who | Argument | Meaning | Rows written |
-|---|---|---|---|---|
-| utterance | speaker | `utterance_actions` | the utterance | speakers' |
-| utterance | speaker | `speaker_other_belief_estimate_actions` | b̄_o: what it thinks the listener now believes | listeners' (subject-indexed) |
-| utterance | speaker | `speaker_second_order_ego_estimate_actions` | b̿_e: what it thinks the listener now believes about it | speakers' (by holder) |
-| belief | listener | `listener_ego_belief_actions` | b_e: its new belief | listeners' |
-| belief | listener | `listener_other_belief_estimate_actions` | b̄_o: what it thinks the speaker believes | speakers' (subject-indexed) |
-| belief | listener | `listener_second_order_ego_estimate_actions` | b̿_e: what it thinks the speaker now believes about it | listeners' (by holder) |
+The belief agent's Dirichlet concentration is `softplus(logits) + 1e-4`. With
+`multiply_by_ego_belief` on (the default), the logits are `log b_e + log L`, which never
+gains support b_e didn't have but gives `+inf` log-probs where b_e is zero (B1 in
+`docs/codebase_overview.md`). With it off, the logits are `log L` alone.
 
-The speaker's own b_e does not change from uttering.
+`--inference.mode` (`training/agent_execution.py`) picks how the agents run:
+- `e2e`: each agent runs its own network.
+- `tom`: the executors in `inference_agents.py` reason through the partner population's
+  network. These are skeletons that currently behave like `e2e`.
 
-Today the agents produce only `utterance_actions` and `listener_ego_belief_actions`.
-`training/rollout.py` passes the four estimate arguments through unchanged.
+The e2e networks are the basis of inferential communication: the ToM executors use them as
+each agent's own policy and as its model of its partner. Names may change as the
+inferential agents take shape.
 
-## What each agent has vs. needs
+## What `step_env` asks of the agents
 
-- **Utterance agent** (`utterance_agents.py`): input `(own_belief, estimate_of_receiver_belief)`,
-  output a Gaussian over utterances. Needs to also output b̄_o of the listener and b̿_e,
-  and probably to take b̿_e as an input (`get_obs` already returns it; nothing reads it).
-- **Belief agent** (`belief_agents.py`): input `(previous_belief, utterance_image)`, output a
-  Dirichlet over b_e. Needs to also output b̄_o of the speaker and b̿_e, and to take their
-  current values as inputs to update them. `get_obs` now provides all three belief levels
-  on both stages.
+| Stage | Who | Argument | Meaning | Rows written | Produced by |
+|---|---|---|---|---|---|
+| utterance | speaker | `utterance_actions` | the utterance | speakers' | utterance agent |
+| utterance | speaker | `speaker_other_belief_estimate_actions` | b̄_o: what it thinks the listener now believes | listeners' (subject-indexed) | passed through |
+| utterance | speaker | `speaker_second_order_ego_estimate_actions` | b̿_e: what it thinks the listener now believes about it | speakers' (by holder) | passed through |
+| belief | listener | `listener_ego_belief_actions` | b_e: its new belief | listeners' | belief agent |
+| belief | listener | `listener_other_belief_estimate_actions` | b̄_o: what it thinks the speaker believes | speakers' (subject-indexed) | passed through |
+| belief | listener | `listener_second_order_ego_estimate_actions` | b̿_e: what it thinks the speaker now believes about it | listeners' (by holder) | passed through |
 
-## The main decision: how are the new estimates produced?
+The speaker's own b_e does not change from uttering. "Passed through" means
+`training/rollout.py` hands back the env's current values (a marked SKELETON block), so
+communication never moves b̄_o or b̿_e. Observations at each act still update them.
 
-1. **Sampled PPO actions.** Extra Dirichlet heads; the action's log-prob is the sum over
-   heads.
-2. **Deterministic heads.** Not sampled, not in the PPO ratio; trained by a separate loss,
-   or untrained at first.
-3. **Theory-of-mind inference from the partner model.** E.g. the speaker runs the listener
-   model on its own rendered utterance to get the listener's b̄_o. The `execute_tom_*`
-   skeletons in `training/agent_execution.py` already sketch this.
+## Open: what produces the new b̄_o and b̿_e?
+
+1. **Sampled PPO actions.** Extra Dirichlet heads, with the action's log-prob summed over
+   heads. Tried on 2026-11-25 and backed out in favour of single-output agents.
+2. **Deterministic heads.** Not sampled and not in the PPO ratio; trained by a separate
+   loss, or untrained at first.
+3. **Inference through the partner's network.** E.g. the speaker runs the listener's belief
+   network on its own rendered utterance to get the listener's b̄_o. The ToM skeletons in
+   `inference_agents.py` are where this would go.
 
 ## Code that changes with the decision
 
-- `training/rollout.py`: the four placeholder estimates, and `Transition` (which stores
-  exactly two inputs per population).
-- `training/ppo_update.py`: assumes two network inputs (`net_input_0`, `net_input_1`) and
-  one log-prob per action.
-- `training/agent_execution.py`: the `execute_*` functions, the ToM variants, and the
-  `InferenceStrategy` signatures.
-- `training/ippo.py` `initialize_agents` and the agents' `initialize_*`: dummy inputs.
+- `training/rollout.py`: the SKELETON block that passes the four estimates through, and
+  `Transition` (one action array per population).
+- `training/ppo_update.py`: one log-prob per action (only if the estimates become sampled
+  actions).
+- `e2e_*_agents.py` and/or `inference_agents.py`: whatever produces the estimates.

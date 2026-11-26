@@ -10,8 +10,8 @@ from flax.training.train_state import TrainState
 
 from training.config import ExperimentConfig
 from training.optimizer import OptimizerConfig
-from agents.belief_agents import BeliefAgentConfig
-from agents.utterance_agents import UtteranceAgentConfig
+from agents.e2e_belief_agents import E2EBeliefAgentConfig
+from agents.e2e_utterance_agents import E2EUtteranceAgentConfig
 from communication.stacked_signification_decpomdp import StackedSignificationDecPOMDP
 from tools.utterance_rendering import paint_multiple_splines
 from tools.visualization import plot_belief_states, plot_utterances
@@ -43,7 +43,7 @@ def _batched_train_states(network: nn.Module, tx, rng, num_agents, *init_inputs)
 
 
 def initialize_belief_agents(
-    agent_config: BeliefAgentConfig,
+    agent_config: E2EBeliefAgentConfig,
     optimizer_config: OptimizerConfig,
     rng,
     num_agents: int,
@@ -57,20 +57,20 @@ def initialize_belief_agents(
     ``network.apply``, a static field) and ``params``, which is all callers need to run the
     model.
     """
-    network = agent_config.build(input_utterance_shape=input_utterance_shape, belief_dim=belief_dim)
+    network = agent_config.build()
     tx = optimizer_config.build()
 
-    # Dummy inputs to shape-init the params: a valid previous belief (uniform over the
-    # simplex -- zeros would send BeliefActor's log-prior to -inf) and a rendered
-    # utterance image. Batch dim of 1; shared across agents.
+    # Dummy inputs to shape-init the params: valid belief levels (uniform over the simplex
+    # -- zeros would send the heads' log-priors to -inf) and a rendered utterance image.
+    # Batch dim of 1; shared across agents.
     dummy_belief = jnp.full((1, belief_dim), 1.0 / belief_dim)
     dummy_utterance = jnp.zeros((1, *input_utterance_shape))
 
-    return _batched_train_states(network, tx, rng, num_agents, dummy_belief, dummy_utterance)
+    return _batched_train_states(network, tx, rng, num_agents, dummy_belief, dummy_belief, dummy_belief, dummy_utterance)
 
 
 def initialize_utterance_agents(
-    agent_config: UtteranceAgentConfig,
+    agent_config: E2EUtteranceAgentConfig,
     optimizer_config: OptimizerConfig,
     rng,
     num_agents: int,
@@ -79,17 +79,16 @@ def initialize_utterance_agents(
 ) -> TrainState:
     """Build ``num_agents`` initialized utterance-agent train states.
 
-    Same contract as ``initialize_belief_agents``; the utterance agent reads the sender's
-    own belief and its estimate of the receiver's belief (both length ``belief_dim``).
+    Same contract as ``initialize_belief_agents``; the utterance agent reads the speaker's
+    three belief levels (each length ``belief_dim``).
     """
-    network = agent_config.build(utterance_action_dim=utterance_action_dim, belief_dim=belief_dim)
+    network = agent_config.build(utterance_action_dim=utterance_action_dim)
     tx = optimizer_config.build()
 
-    # Dummy inputs: the sender's own belief and its estimate of the receiver's belief.
-    dummy_own_belief = jnp.full((1, belief_dim), 1.0 / belief_dim)
-    dummy_estimate = jnp.full((1, belief_dim), 1.0 / belief_dim)
+    # Dummy inputs: the speaker's three belief levels, uniform for the same reason as above.
+    dummy_belief = jnp.full((1, belief_dim), 1.0 / belief_dim)
 
-    return _batched_train_states(network, tx, rng, num_agents, dummy_own_belief, dummy_estimate)
+    return _batched_train_states(network, tx, rng, num_agents, dummy_belief, dummy_belief, dummy_belief)
 
 
 def build_env(config: ExperimentConfig) -> StackedSignificationDecPOMDP:
@@ -152,9 +151,6 @@ def make_train(config: ExperimentConfig):
     image_dim = config.environment.utterance_image_dim
     input_utterance_shape = (image_dim, image_dim)
     render_utterance_fn = make_render_utterance_fn(image_dim)
-    # How agents reason during rollouts (first-order vs. ToM); resolved once here and
-    # threaded into every env_step by collect_rollout.
-    inference_strategy = config.inference.build()
 
     def train(rng):
         agent_rng, env_rng, loop_rng = jax.random.split(rng, 3)
@@ -180,33 +176,33 @@ def make_train(config: ExperimentConfig):
             debug_batch = 8
             db_belief, db_image, db_bs, db_us = jax.random.split(jax.random.fold_in(rng, 0xDEB), 4)
 
-            # One shared belief batch (valid simplex points -- BeliefActor takes its log) fed
-            # to BOTH populations: as the belief agents' previous_belief and as the utterance
-            # agents' own_belief and receiver estimate. Same distributions across every agent.
+            # One shared belief batch (valid simplex points -- the Dirichlet heads take its
+            # log) fed to BOTH populations as every belief level. Same distributions across
+            # every agent.
             debug_belief = jax.random.dirichlet(db_belief, jnp.ones(belief_dim), shape=(debug_batch,))
             debug_utterance_image = jax.random.uniform(db_image, (debug_batch, *input_utterance_shape))
             print(debug_belief)
 
-            def belief_forward(params, prev_belief, utterance_image, sample_key):
-                dist, value = belief_train_states.apply_fn(params, prev_belief, utterance_image)
+            def belief_forward(params, sample_key):
+                dist, value = belief_train_states.apply_fn(params, debug_belief, debug_belief, debug_belief, debug_utterance_image)
                 # concentration [batch, belief_dim]; sample is a next-belief on the simplex.
                 return dist.concentration, dist.sample(seed=sample_key), value
 
             # -> concentration [num_agents, batch, belief_dim], sample [num_agents, batch, belief_dim],
             #    value [num_agents, batch]
-            belief_debug_concentration, belief_debug_sample, belief_debug_value = jax.vmap(belief_forward, in_axes=(0, None, None, None))(
-                belief_train_states.params, debug_belief, debug_utterance_image, db_bs
+            belief_debug_concentration, belief_debug_sample, belief_debug_value = jax.vmap(belief_forward, in_axes=(0, None))(
+                belief_train_states.params, db_bs
             )
 
-            def utterance_forward(params, own_belief, estimate_belief, sample_key):
-                dist, value = utterance_train_states.apply_fn(params, own_belief, estimate_belief)
+            def utterance_forward(params, sample_key):
+                dist, value = utterance_train_states.apply_fn(params, debug_belief, debug_belief, debug_belief)
                 # loc/scale_diag [batch, utterance_action_dim]; sample is an utterance vector.
                 return dist.loc, dist.scale_diag, dist.sample(seed=sample_key), value
 
             # -> loc/scale/sample [num_agents, batch, utterance_action_dim], value [num_agents, batch]
             utterance_debug_loc, utterance_debug_scale, utterance_debug_sample, utterance_debug_value = jax.vmap(
-                utterance_forward, in_axes=(0, None, None, None)
-            )(utterance_train_states.params, debug_belief, debug_belief, db_us)
+                utterance_forward, in_axes=(0, None)
+            )(utterance_train_states.params, db_us)
 
             # Render each sampled utterance to a canvas so it can be viewed as an image. The
             # utterance vector is spline control points; paint_multiple_splines maps over its
@@ -275,7 +271,7 @@ def make_train(config: ExperimentConfig):
                 config.rollout_length,
                 render_utterance_fn,
                 image_dim,
-                inference_strategy,
+                config.inference,
             )
 
             # 2) Turn the rollout into per-population advantages + value targets. The env is

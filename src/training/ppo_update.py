@@ -26,10 +26,10 @@ training.advantages), so the loss ``nan_to_num``s the recompute inputs first: a 
 masked-out term still poisons gradients (``0 * NaN = NaN``), so it must never enter the
 graph, not merely be zeroed after the fact.
 
-Recompute uses the first-order network forward pass (not any ToM search) regardless of how
+Recompute uses the agent's own e2e network forward pass (not any ToM search) regardless of how
 the rollout was collected: the rollout stores each action's log-prob under that same network
 policy, so the PPO ratio is consistent. That is also why this module never needs the
-inference strategy.
+inference config.
 """
 
 from __future__ import annotations
@@ -58,13 +58,13 @@ class PPOConfig:
     # (rollout_length must be divisible by num_minibatches)
 
 
-def _ppo_loss(params, apply_fn, net_input_0, net_input_1, actions, old_log_probs, old_values, advantages, targets, stage_mask, clip_eps, vf_coef, ent_coef):
+def _ppo_loss(params, apply_fn, net_inputs, actions, old_log_probs, old_values, advantages, targets, stage_mask, clip_eps, vf_coef, ent_coef):
     """Masked clipped-PPO loss for ONE agent over its rollout column.
 
-    All per-step arrays have leading ``[num_steps]``. ``net_input_0`` / ``net_input_1`` are
-    the two positional inputs this population's network consumes (belief: previous_belief,
-    utterance_image; utterance: own_belief, partner_estimate). ``stage_mask`` is the boolean
-    per-step mask of this population's own stages. Returns ``(loss, aux_metrics)``.
+    All per-step arrays have leading ``[num_steps]``. ``net_inputs`` is the tuple of
+    positional inputs this population's network consumes (see ``rollout.Transition``).
+    ``stage_mask`` is the boolean per-step mask of this population's own stages. Returns
+    ``(loss, aux_metrics)``.
     """
     # Sanitize everything derived from off-stage steps (all masked out below): the stored
     # recompute inputs / old stats are not guaranteed finite there, and neither is
@@ -72,15 +72,14 @@ def _ppo_loss(params, apply_fn, net_input_0, net_input_1, actions, old_log_probs
     # NaN anywhere poisons the gradient even when its step is masked (0 * NaN = NaN), so it
     # must never enter the graph. On-stage steps are finite, so this is a no-op where it
     # matters.
-    net_input_0 = jnp.nan_to_num(net_input_0)
-    net_input_1 = jnp.nan_to_num(net_input_1)
+    net_inputs = jax.tree.map(jnp.nan_to_num, net_inputs)
     actions = jnp.nan_to_num(actions)
     old_log_probs = jnp.nan_to_num(old_log_probs)
     old_values = jnp.nan_to_num(old_values)
     advantages = jnp.nan_to_num(advantages)
     targets = jnp.nan_to_num(targets)
 
-    pi, values = apply_fn(params, net_input_0, net_input_1)
+    pi, values = apply_fn(params, *net_inputs)
     new_log_probs = pi.log_prob(actions)  # [num_steps]
     entropy = pi.entropy()  # [num_steps]
 
@@ -126,12 +125,12 @@ def _ppo_loss(params, apply_fn, net_input_0, net_input_1, actions, old_log_probs
     return total_loss, aux
 
 
-def _update_one_agent(train_state, net_input_0, net_input_1, actions, old_log_probs, old_values, advantages, targets, stage_mask, clip_eps, vf_coef, ent_coef):
+def _update_one_agent(train_state, net_inputs, actions, old_log_probs, old_values, advantages, targets, stage_mask, clip_eps, vf_coef, ent_coef):
     """One agent's value-and-grad + optimizer step; ``vmap``-ed over agents by the caller."""
 
     def loss_fn(params):
         return _ppo_loss(
-            params, train_state.apply_fn, net_input_0, net_input_1, actions, old_log_probs,
+            params, train_state.apply_fn, net_inputs, actions, old_log_probs,
             old_values, advantages, targets, stage_mask, clip_eps, vf_coef, ent_coef,
         )
 
@@ -139,16 +138,17 @@ def _update_one_agent(train_state, net_input_0, net_input_1, actions, old_log_pr
     return train_state.apply_gradients(grads=grads), aux
 
 
-# Map the single-agent update over the num_agents axis. Agent-indexed arrays are on axis 1
-# of the [num_steps, num_agents, ...] rollout; the train state batches on axis 0; the
-# per-step stage mask and the scalar coefficients are shared (None).
+# Map the single-agent update over the num_agents axis. Agent-indexed arrays (including
+# every array in the net_inputs tuple) are on axis 1 of the [num_steps, num_agents, ...]
+# rollout; the train state batches on axis 0; the per-step stage mask and the scalar
+# coefficients are shared (None).
 _update_all_agents = jax.vmap(
     _update_one_agent,
-    in_axes=(0, 1, 1, 1, 1, 1, 1, 1, None, None, None, None),
+    in_axes=(0, 1, 1, 1, 1, 1, 1, None, None, None, None),
 )
 
 
-def _update_population(rng, train_states, net_input_0, net_input_1, actions, old_log_probs, old_values, advantages, targets, stage_mask, config: PPOConfig):
+def _update_population(rng, train_states, net_inputs, actions, old_log_probs, old_values, advantages, targets, stage_mask, config: PPOConfig):
     """Run ``config.update_epochs`` minibatched gradient steps for one population.
 
     Each epoch reshuffles the step axis and splits it into ``config.num_minibatches``
@@ -168,7 +168,7 @@ def _update_population(rng, train_states, net_input_0, net_input_1, actions, old
     # lockstep (keeping each step's mask aligned with its data). Step axis is axis 0 for
     # every leaf: agent-indexed arrays are [num_steps, num_agents, ...]; stage_mask is
     # [num_steps] (no agent axis).
-    data = (net_input_0, net_input_1, actions, old_log_probs, old_values, advantages, targets, stage_mask)
+    data = (net_inputs, actions, old_log_probs, old_values, advantages, targets, stage_mask)
 
     def _epoch(train_states, epoch_rng):
         perm = jax.random.permutation(epoch_rng, num_steps)
@@ -180,9 +180,9 @@ def _update_population(rng, train_states, net_input_0, net_input_1, actions, old
         )
 
         def _minibatch(train_states, mb):
-            net0, net1, acts, old_lp, old_v, adv, tgt, mask = mb
+            inputs, acts, old_lp, old_v, adv, tgt, mask = mb
             train_states, aux = _update_all_agents(
-                train_states, net0, net1, acts, old_lp, old_v, adv, tgt, mask,
+                train_states, inputs, acts, old_lp, old_v, adv, tgt, mask,
                 config.clip_eps, config.vf_coef, config.ent_coef,
             )
             # aux leaves carry a leading num_agents axis; average over agents.
@@ -209,12 +209,10 @@ def ppo_update(rng, belief_train_states, utterance_train_states, transitions, ad
     is_utterance_step = transitions.stage == UTTERANCE_STAGE
     is_belief_step = transitions.stage == BELIEF_STAGE
 
-    # Utterance (speaker): network consumes (own_belief, partner_estimate).
     utterance_train_states, utterance_metrics = _update_population(
         utterance_rng,
         utterance_train_states,
-        transitions.utterance_own_belief,
-        transitions.utterance_partner_estimate,
+        transitions.utterance_inputs,
         transitions.utterance_action,
         transitions.utterance_log_prob,
         transitions.utterance_value,
@@ -224,12 +222,10 @@ def ppo_update(rng, belief_train_states, utterance_train_states, transitions, ad
         config,
     )
 
-    # Belief (listener): network consumes (previous_belief, utterance_image).
     belief_train_states, belief_metrics = _update_population(
         belief_rng,
         belief_train_states,
-        transitions.belief_previous_belief,
-        transitions.belief_utterance_image,
+        transitions.belief_inputs,
         transitions.belief_action,
         transitions.belief_log_prob,
         transitions.belief_value,

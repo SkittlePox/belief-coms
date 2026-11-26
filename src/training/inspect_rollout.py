@@ -49,7 +49,7 @@ def run_rollout(config: ExperimentConfig, num_steps: int):
         env=env,
         render_utterance_fn=make_render_utterance_fn(image_dim),
         utterance_image_dim=image_dim,
-        inference_strategy=config.inference.build(),
+        inference=config.inference,
     )
 
     def traced_step(carry, _):
@@ -126,21 +126,21 @@ def print_step(t, prev, tr, post, max_utterance_dims):
         tag = "+".join(x for x, on in (("speaks", speaks), ("listens", listens)) if on) or "idle"
         print(f"  agent {agent} (game {int(roles.agent_game_assignment[agent])}, role {role}, "
               f"partner {int(roles.partner_agent[agent])}, {tag})")
+        inputs = tr.utterance_inputs if on_utterance_stage else tr.belief_inputs
+        print(f"      in : b_e {_vec(inputs[0][agent])}   b̄_o {_vec(inputs[1][agent])}   b̿_e {_vec(inputs[2][agent])}")
         if on_utterance_stage:
-            print(f"      in : own belief {_vec(tr.utterance_own_belief[agent])}   "
-                  f"partner estimate {_vec(tr.utterance_partner_estimate[agent])}")
             print(f"      out: utterance {_vec(tr.utterance_action[agent], max_utterance_dims)}   "
                   f"log_prob {tr.utterance_log_prob[agent]:.3f}   value {tr.utterance_value[agent]:.3f}")
             print(f"      stored utterance (delivered) {_vec(post.agent_utterance_actions_unrendered[agent], max_utterance_dims)}")
         else:
-            print(f"      in : previous belief {_vec(tr.belief_previous_belief[agent])}   "
-                  f"utterance image sum {tr.belief_utterance_image[agent].sum():.1f}")
+            print(f"      in : utterance image sum {inputs[3][agent].sum():.1f}")
             print(f"      out: belief action {_vec(tr.belief_action[agent])}   "
                   f"log_prob {tr.belief_log_prob[agent]:.3f}   value {tr.belief_value[agent]:.3f}")
         print(f"      env: action {int(post.last_agent_actions[agent])}   obs {int(post.last_agent_observations[agent])}   "
               f"reward {tr.reward[agent]:.3f}")
         print(f"      post: true belief {_vec(post.true_agent_belief_states[agent])}   "
-              f"estimate about agent {_vec(post.estimated_agent_belief_states[agent])}")
+              f"estimate about agent {_vec(post.estimated_agent_belief_states[agent])}   "
+              f"b̿_e {_vec(post.second_order_agent_belief_estimates[agent])}")
 
     if bool(tr.done):
         print_assignment(post, f"episode {int(nc.episode_index)} begins (post-step {t})")

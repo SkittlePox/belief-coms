@@ -9,15 +9,15 @@ zeros the rest. We therefore record BOTH populations' actions/values/log-probs p
 ``stage`` at every step, and rely on a later masking pass (returns/PPO) to keep only the
 entries that actually drove the env on each stage.
 
-Each ``Transition`` also stores the exact inputs each agent consumed (own belief, partner
-estimate, rendered utterance) so the PPO update can re-run the policies under fresh params
-without re-deriving them from the state.
+Each ``Transition`` also stores the exact inputs each agent consumed (its belief levels
+and, for the listener, the rendered utterance) so the PPO update can re-run the policies
+under fresh params without re-deriving them from the state.
 """
 
 from __future__ import annotations
 
 from functools import partial
-from typing import NamedTuple
+from typing import NamedTuple, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -41,30 +41,28 @@ class Transition(NamedTuple):
     done: jnp.ndarray  # scalar bool: did this step cross an episode boundary (re-route)?
 
     # --- Utterance (speaker) population --------------------------------------
+    utterance_inputs: Tuple[jnp.ndarray, ...]  # (b_e, b̄_o, b̿_e), each [num_agents, belief_dim]  (inputs consumed)
     utterance_action: jnp.ndarray  # [num_agents, utterance_action_dim]
     utterance_log_prob: jnp.ndarray  # [num_agents]
     utterance_value: jnp.ndarray  # [num_agents]
-    utterance_own_belief: jnp.ndarray  # [num_agents, belief_dim]  (input consumed)
-    utterance_partner_estimate: jnp.ndarray  # [num_agents, belief_dim]  (input consumed)
 
     # --- Belief (listener) population ----------------------------------------
+    belief_inputs: Tuple[jnp.ndarray, ...]  # (b_e, b̄_o, b̿_e, utterance image), each [num_agents, ...]  (inputs consumed)
     belief_action: jnp.ndarray  # [num_agents, belief_dim]  (a next-belief on the simplex)
     belief_log_prob: jnp.ndarray  # [num_agents]
     belief_value: jnp.ndarray  # [num_agents]
-    belief_previous_belief: jnp.ndarray  # [num_agents, belief_dim]  (input consumed)
-    belief_utterance_image: jnp.ndarray  # [num_agents, image_dim, image_dim]  (input consumed)
 
 
-def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_strategy):
+def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference):
     """One ``jax.lax.scan`` step: act with both populations, step the env, emit a Transition.
 
     No Python control flow (this is a scan body). ``env``, ``render_utterance_fn``,
-    ``utterance_image_dim`` and ``inference_strategy`` are bound via ``partial`` in
+    ``utterance_image_dim`` and ``inference`` are bound via ``partial`` in
     ``collect_rollout``; the scanned inputs are unused (``xs=None``).
 
-    ``inference_strategy`` (an ``agent_execution.InferenceStrategy``) decides whether each
-    population thinks first-order or with ToM; this step just hands it each population as an
-    ``(apply_fn, params)`` pair plus the partner population, and stays agnostic to which.
+    ``inference`` (an ``agent_execution.AgentInferenceConfig``) decides whether each
+    population runs e2e or with ToM; this step hands it both populations and stays agnostic
+    to which.
 
     Carry: ``(belief_train_states, utterance_train_states, env_state, last_obs, rng)``.
     The two train states are carried read-only (params are fixed during a rollout) so this
@@ -73,12 +71,10 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
     """
     belief_train_states, utterance_train_states, env_state, last_obs, rng = carry
     # last_obs is get_obs(state) from the PREVIOUS step, each [num_agents, ...] and indexed
-    # so row i is what agent i consumes: its own belief, its estimate of its partner, its
-    # second-order estimate, and the utterance it hears (NaN on the utterance stage, when
-    # there is none yet) -- see get_obs.
-    # NOTE: second-order estimates (b̿_e) are not consumed yet; the speaker and listener
-    # models will take them as inputs.
-    own_beliefs, obs_partner_estimates, _obs_second_order_estimates, obs_partner_utterances = last_obs
+    # so row i is what agent i consumes: its own belief (b_e), its estimate of its partner
+    # (b̄_o), its second-order estimate (b̿_e), and the utterance it hears (NaN on the
+    # utterance stage, when there is none yet) -- see get_obs.
+    ego_beliefs, other_belief_estimates, second_order_ego_estimates, obs_partner_utterances = last_obs
 
     rng, utt_rng, bel_rng, render_rng, step_rng = jax.random.split(rng, 5)
 
@@ -87,20 +83,10 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
     stage = env_state.dialog.communicative_round_stage
     episode_index_before = env_state.game_counters.episode_index
 
-    # Each population as an (apply_fn, params) handle, so the strategy can be handed both
-    # its own and its partner's model uniformly (the partner is unused in first-order mode).
-    utterance_pop = (utterance_train_states.apply_fn, utterance_train_states.params)
-    belief_pop = (belief_train_states.apply_fn, belief_train_states.params)
-
     # --- Utterance (speaker) population --------------------------------------
-    # Conditions on own belief + the estimate of the receiver-partner it is engaged with.
-    utterance_actions, utterance_log_probs, utterance_values = inference_strategy.run_utterance_agents(
-        utt_rng,
-        utterance_pop,
-        belief_pop,
-        own_beliefs,
-        obs_partner_estimates,
-        render_utterance_fn,
+    utterance_inputs = (ego_beliefs, other_belief_estimates, second_order_ego_estimates)
+    utterance_actions, utterance_log_probs, utterance_values = inference.run_utterance_agents(
+        utt_rng, utterance_train_states, belief_train_states, *utterance_inputs, render_utterance_fn
     )
 
     # --- Belief (listener) population ----------------------------------------
@@ -118,35 +104,18 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
         lambda: render_utterance_fn(render_rng, obs_partner_utterances),
         lambda: jnp.zeros((num_agents, utterance_image_dim, utterance_image_dim), dtype=jnp.float32),
     )  # [num_agents, D, D]
-    listener_ego_belief_actions, belief_log_probs, belief_values = inference_strategy.run_belief_agents(
-        bel_rng,
-        belief_pop,
-        utterance_pop,
-        own_beliefs,
-        utterance_images,
-        render_utterance_fn,
+    belief_inputs = (ego_beliefs, other_belief_estimates, second_order_ego_estimates, utterance_images)
+    listener_ego_belief_actions, belief_log_probs, belief_values = inference.run_belief_agents(
+        bel_rng, belief_train_states, utterance_train_states, *belief_inputs, render_utterance_fn
     )
 
-    # --- Speaker's post-utterance estimates (step_env's 3rd and 4th inputs) ----
-    # SKELETON: step_env also wants each speaker's refreshed estimate of its
-    # listener-partner's belief (b̄_o; SUBJECT-indexed: row i = estimate ABOUT agent i) and
-    # of what that listener believes about the speaker (b̿_e; row i held by agent i). For
-    # now pass the existing estimates through unchanged so shapes/plumbing are correct;
-    # replace with the speaker's ToM re-estimates (e.g. belief model run on its own
-    # utterance) later.
+    # --- Belief estimates (step_env's b̄_o and b̿_e inputs) ---------------------
+    # SKELETON: the agents don't produce these yet, so pass the env's current estimates
+    # through unchanged. Shapes and plumbing are correct, but the estimates never move
+    # from communication; replace once we decide what produces them.
     speaker_other_belief_estimate_actions = env_state.estimated_agent_belief_states
     speaker_second_order_ego_estimate_actions = env_state.second_order_agent_belief_estimates
-
-    # --- Listener's post-listening estimate (step_env's 6th input) ------------
-    # SKELETON: step_env also wants each listener's refreshed estimate of its speaker's
-    # belief (SUBJECT-indexed: row i = estimate ABOUT agent i). Passed through unchanged for
-    # now, like the post-utterance estimate; replace with the listener's re-estimate later.
     listener_other_belief_estimate_actions = env_state.estimated_agent_belief_states
-
-    # --- Listener's post-listening second-order estimate (7th input) ---------
-    # SKELETON: step_env also wants each listener's new b̿_e -- what it now thinks its
-    # speaker believes about it (row i held by and about agent i). Passed through unchanged
-    # for now; replace with the listener's re-estimate later.
     listener_second_order_ego_estimate_actions = env_state.second_order_agent_belief_estimates
 
     # --- Step the environment one stage --------------------------------------
@@ -171,16 +140,14 @@ def env_step(carry, _, env, render_utterance_fn, utterance_image_dim, inference_
         stage=stage,
         reward=rewards,
         done=done,
+        utterance_inputs=utterance_inputs,
         utterance_action=utterance_actions,
         utterance_log_prob=utterance_log_probs,
         utterance_value=utterance_values,
-        utterance_own_belief=own_beliefs,
-        utterance_partner_estimate=obs_partner_estimates,
+        belief_inputs=belief_inputs,
         belief_action=listener_ego_belief_actions,
         belief_log_prob=belief_log_probs,
         belief_value=belief_values,
-        belief_previous_belief=own_beliefs,
-        belief_utterance_image=utterance_images,
     )
 
     carry = (belief_train_states, utterance_train_states, env_state, next_obs, rng)
@@ -197,11 +164,11 @@ def collect_rollout(
     num_steps,
     render_utterance_fn,
     utterance_image_dim,
-    inference_strategy,
+    inference,
 ):
     """Scan ``env_step`` ``num_steps`` times, threading the env state forward.
 
-    ``inference_strategy`` (first-order or ToM) is bound into every step. Returns
+    ``inference`` (e2e or ToM) is bound into every step. Returns
     ``(env_state, last_obs, rng, transitions)`` where ``transitions`` is a ``Transition``
     whose leaves carry a leading ``[num_steps]`` axis, and the first three are the
     post-rollout carry to fold back into the training loop.
@@ -211,7 +178,7 @@ def collect_rollout(
         env=env,
         render_utterance_fn=render_utterance_fn,
         utterance_image_dim=utterance_image_dim,
-        inference_strategy=inference_strategy,
+        inference=inference,
     )
     init_carry = (belief_train_states, utterance_train_states, env_state, last_obs, rng)
     (_belief_train_states, _utterance_train_states, env_state, last_obs, rng), transitions = jax.lax.scan(

@@ -19,8 +19,8 @@ import dataclasses
 from communication.communication_scheme import CommunicationConfig
 from communication.game_role_assignment import AssignmentConfig, SimpleAssignmentConfig
 from communication.stacked_signification_decpomdp import EnvironmentConfig
-from agents.belief_agents import BeliefAgentConfig
-from agents.utterance_agents import UtteranceAgentConfig
+from agents.e2e_belief_agents import E2EBeliefAgentConfig
+from agents.e2e_utterance_agents import E2EUtteranceAgentConfig
 from training.optimizer import OptimizerConfig
 from training.agent_execution import AgentInferenceConfig
 from training.ppo_update import PPOConfig
@@ -43,9 +43,9 @@ class ExperimentConfig:
     role_assignment: AssignmentConfig = dataclasses.field(default_factory=SimpleAssignmentConfig)
     communication: CommunicationConfig = dataclasses.field(default_factory=CommunicationConfig)
     environment: EnvironmentConfig = dataclasses.field(default_factory=EnvironmentConfig)
-    belief_agents: BeliefAgentConfig = dataclasses.field(default_factory=BeliefAgentConfig)
-    utterance_agents: UtteranceAgentConfig = dataclasses.field(default_factory=UtteranceAgentConfig)
-    # How agents reason during rollouts: first-order (own network only) or ToM (reasoning
+    belief_agents: E2EBeliefAgentConfig = dataclasses.field(default_factory=E2EBeliefAgentConfig)
+    utterance_agents: E2EUtteranceAgentConfig = dataclasses.field(default_factory=E2EUtteranceAgentConfig)
+    # How agents run during rollouts: e2e (own network only) or ToM (reasoning
     # through the partner's model). See training.agent_execution.
     inference: AgentInferenceConfig = dataclasses.field(default_factory=AgentInferenceConfig)
     # PPO update hyperparameters (clip range, loss weights, epochs per iteration).
